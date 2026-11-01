@@ -6,6 +6,7 @@
   "main": "dist/server.js",
   "scripts": {
     "build": "tsc",
+    "postinstall": "tsc",
     "start": "node dist/server.js",
     "test": "node --import tsx --test tests/*.test.ts"
   },
