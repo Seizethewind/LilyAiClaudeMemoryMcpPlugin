@@ -1,0 +1,21 @@
+{
+  "name": "lily-memory-mcp",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Self-hosted MCP server: GitHub read/write tools plus persistent Turso-backed memory (prompt + plan + result) for Claude.",
+  "main": "dist/server.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "test": "node --import tsx --test tests/*.test.ts"
+  },
+  "engines": { "node": ">=22" },
+  "dependencies": {
+    "@libsql/client": "^0.15.0",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0"
+  }
+}

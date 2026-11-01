@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: lily-memory-mcp
+    runtime: node
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: MCP_ADMIN_SECRET
+        sync: false
+      - key: MCP_JWT_SECRET
+        sync: false
+      - key: MCP_BASE_URL
+        sync: false
+      - key: ALLOWED_REPOS
+        value: "*"
+      - key: TURSO_DATABASE_URL
+        sync: false
+      - key: TURSO_AUTH_TOKEN
+        sync: false
