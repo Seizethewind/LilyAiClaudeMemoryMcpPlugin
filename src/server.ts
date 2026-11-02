@@ -63,6 +63,7 @@
 
 import { MemoryStore, buildMemoryTools, MEMORY_INSTRUCTIONS } from './memory';
 import { openTurso } from './db';
+import { buildGuideTools, PROMPTS, getPrompt, GUIDE_HINT } from './guide';
 
 const http = require('http');
 const https = require('https');
@@ -289,7 +290,7 @@ function clientIp(req) {
 
 function makeRateLimiter({ windowMs, maxPerIp, maxGlobal }) {
   const perIp = new Map(); // ip -> [timestamps]
-  let global = [];
+  let global: number[] = [];
 
   function recent(list) {
     const cutoff = Date.now() - windowMs;
@@ -336,8 +337,8 @@ const tokenLimiter = makeRateLimiter({ windowMs: 15 * 60 * 1000, maxPerIp: 30, m
 // GitHub REST API helper
 // ---------------------------------------------------------------------------
 
-function githubRequest(method, path, body) {
-  return new Promise((resolve, reject) => {
+function githubRequest(method, path, body?): Promise<{ status: number; body: any }> {
+  return new Promise<{ status: number; body: any }>((resolve, reject) => {
     const data = body ? JSON.stringify(body) : null;
     const req = https.request(
       {
@@ -356,7 +357,7 @@ function githubRequest(method, path, body) {
         let raw = '';
         res.on('data', (chunk) => (raw += chunk));
         res.on('end', () => {
-          let parsed = null;
+          let parsed: any = null;
           try {
             parsed = raw ? JSON.parse(raw) : null;
           } catch (e) {
@@ -380,7 +381,7 @@ function assertRepoAllowed(owner, repo) {
     ALLOWED_REPOS.has(`${owner}/*`) ||
     ALLOWED_REPOS.has('*');
   if (!allowed) {
-    const err = new Error(`Repo "${key}" is not in ALLOWED_REPOS for this bridge.`);
+    const err: any = new Error(`Repo "${key}" is not in ALLOWED_REPOS for this bridge.`);
     err.isToolError = true;
     throw err;
   }
@@ -575,7 +576,7 @@ const TOOLS: any[] = [
       if (commitRes.status >= 400) throw new Error(`GitHub error ${commitRes.status}: ${JSON.stringify(commitRes.body)}`);
       const baseTreeSha = commitRes.body.tree.sha;
 
-      const blobs = [];
+      const blobs: any[] = [];
       for (const f of files) {
         const blobRes = await githubRequest('POST', `/repos/${owner}/${repo}/git/blobs`, {
           content: Buffer.from(f.content, 'utf8').toString('base64'),
@@ -608,11 +609,14 @@ const TOOLS: any[] = [
   },
 ];
 
+// On-demand repo breakdown playbook (no analysis runs here; Claude does it).
+TOOLS.push(...buildGuideTools());
+
 // ---------------------------------------------------------------------------
 // HTTP helpers
 // ---------------------------------------------------------------------------
 
-function sendJson(res, status, obj, extraHeaders) {
+function sendJson(res, status, obj, extraHeaders?) {
   const body = JSON.stringify(obj);
   res.writeHead(status, {
     'Content-Type': 'application/json',
@@ -632,9 +636,9 @@ const MAX_BODY_BYTES = 2 * 1024 * 1024; // 2 MB
 class PayloadTooLargeError extends Error {}
 
 function readBody(req) {
-  return new Promise((resolve, reject) => {
+  return new Promise<string>((resolve, reject) => {
     let size = 0;
-    const chunks = [];
+    const chunks: Buffer[] = [];
     req.on('data', (chunk) => {
       size += chunk.length;
       if (size > MAX_BODY_BYTES) {
@@ -774,7 +778,7 @@ button{padding:10px 16px;cursor:pointer}
 }
 
 function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  return String(s).replace(/[&<>"']/g, (c: string) => (({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' } as Record<string, string>)[c]));
 }
 
 async function handleAuthorizePost(req, res) {
@@ -917,9 +921,9 @@ async function handleMcp(req, res) {
         id,
         result: {
           protocolVersion: '2024-11-05',
-          capabilities: { tools: {} },
+          capabilities: { tools: {}, prompts: {} },
           serverInfo: { name: 'lily-github-mcp-bridge', version: '2.0.0' },
-          instructions: memoryStore ? MEMORY_INSTRUCTIONS : undefined,
+          instructions: [memoryStore ? MEMORY_INSTRUCTIONS : '', GUIDE_HINT].filter(Boolean).join('\n\n'),
         },
       });
       return;
@@ -931,6 +935,21 @@ async function handleMcp(req, res) {
         id,
         result: { tools: TOOLS.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })) },
       });
+      return;
+    }
+
+    if (method === 'prompts/list') {
+      sendJson(res, 200, { jsonrpc: '2.0', id, result: { prompts: PROMPTS } });
+      return;
+    }
+
+    if (method === 'prompts/get') {
+      const prompt = getPrompt(params && params.name, params && params.arguments);
+      if (!prompt) {
+        sendJson(res, 200, { jsonrpc: '2.0', id, error: { code: -32602, message: `Unknown prompt: ${params && params.name}` } });
+        return;
+      }
+      sendJson(res, 200, { jsonrpc: '2.0', id, result: prompt });
       return;
     }
 
