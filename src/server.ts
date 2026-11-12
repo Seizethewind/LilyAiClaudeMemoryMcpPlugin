@@ -1003,6 +1003,9 @@ const TOOL_ANNOTATIONS: Record<string, Record<string, boolean>> = {
   memory_restore: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   memory_lock_repo: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   memory_rename_repo: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  blueprint_get: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  blueprint_save: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  blueprint_history: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   memory_forget: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
   memory_wipe_repo: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
 };

@@ -117,11 +117,12 @@ export function createMemoryAdmin(deps: AdminDeps) {
     const lockedEntries = locked.reduce((n, r) => n + r.entries, 0);
 
     const repoRows = s.repos.length
-      ? s.repos.map((r) => `<tr><td><code>${esc(r.repo)}</code></td><td>${r.entries}</td><td>${r.unfinished}</td><td>${r.in_trash}</td>
+      ? s.repos.map((r) => `<tr><td><code>${esc(r.repo)}</code></td><td>${r.entries}</td><td>${r.unfinished}</td><td>${r.in_trash}</td><td>${r.blueprint === null ? '' : 'v' + r.blueprint}</td>
           <td>${r.locked ? '<span class="badge">locked</span>' : ''}</td>
           <td><form class="inline" method="post" action="${BASE}/action">${csrf}<input type="hidden" name="repo" value="${esc(r.repo)}">
-            <button name="action" value="${r.locked ? 'unlock' : 'lock'}">${r.locked ? 'Unlock' : 'Lock'}</button></form></td></tr>`).join('')
-      : '<tr><td colspan="6" class="mut">No repositories yet.</td></tr>';
+            <button name="action" value="${r.locked ? 'unlock' : 'lock'}">${r.locked ? 'Unlock' : 'Lock'}</button></form>
+            ${r.blueprint === null ? '' : `<form class="inline" method="post" action="${BASE}/action">${csrf}<input type="hidden" name="repo" value="${esc(r.repo)}"><input name="phrase" placeholder="DELETE BLUEPRINT ${esc(r.repo)}" size="28" autocomplete="off"><button name="action" value="delete_blueprint">Delete blueprint</button></form>`}</td></tr>`).join('')
+      : '<tr><td colspan="7" class="mut">No repositories yet.</td></tr>';
 
     const trashRows = s.trash.batches.length
       ? s.trash.batches.map((b: any) => `<tr><td><code>${esc(b.batch ?? 'legacy')}</code></td><td><code>${esc(b.repo)}</code></td><td>${b.entries}</td><td>${esc(b.removed_at)}</td><td>${esc(b.erased_after)}</td>
@@ -141,7 +142,7 @@ export function createMemoryAdmin(deps: AdminDeps) {
       ${flashHtml}
 
       <h2>Repositories</h2>
-      <div class="card scroll"><table><tr><th>Repository</th><th>Entries</th><th>Unfinished</th><th>In trash</th><th></th><th></th></tr>${repoRows}</table>
+      <div class="card scroll"><table><tr><th>Repository</th><th>Entries</th><th>Unfinished</th><th>In trash</th><th>Blueprint</th><th></th><th></th></tr>${repoRows}</table>
         <p class="mut">A locked repository cannot be wiped or renamed by Claude. Only you can unlock it here.</p></div>
 
       <h2>Trash</h2>
@@ -177,6 +178,12 @@ export function createMemoryAdmin(deps: AdminDeps) {
         if (action === 'lock') await store.lockRepo({ repo: key }, 'admin');
         else await store.unlockRepo(key, 'admin');
         return `${action === 'lock' ? 'Locked' : 'Unlocked'} ${key}.`;
+      }
+      case 'delete_blueprint': {
+        const { key } = normalizeRepo(form.get('repo'));
+        if ((form.get('phrase') || '').trim() !== `DELETE BLUEPRINT ${key}`) throw new Error(`type DELETE BLUEPRINT ${key} exactly to confirm. Nothing was deleted.`);
+        await store.deleteBlueprint(key, 'admin');
+        return `Deleted the blueprint of ${key}, including its history.`;
       }
       case 'restore_batch': {
         const r = await store.restoreBatch(String(form.get('batch') || ''), 'admin');

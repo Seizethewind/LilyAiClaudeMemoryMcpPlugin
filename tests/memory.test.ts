@@ -111,6 +111,7 @@ test('validation: status, empty update, caps, tools list', async () => {
   assert.deepEqual(names, [
     'memory_start', 'memory_repos', 'memory_save', 'memory_update', 'memory_search', 'memory_timeline', 'memory_get',
     'memory_forget', 'memory_wipe_repo', 'memory_trash', 'memory_restore', 'memory_lock_repo', 'memory_rename_repo',
+    'blueprint_get', 'blueprint_save', 'blueprint_history',
   ]);
   await assert.rejects(s.save({ prompt: 'no repo' }), /repo is required/);
 });
