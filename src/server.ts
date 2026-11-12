@@ -81,12 +81,27 @@ const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const ADMIN_SECRET = process.env.MCP_ADMIN_SECRET;
 const JWT_SECRET = process.env.MCP_JWT_SECRET || ADMIN_SECRET;
 const BASE_URL = (process.env.MCP_BASE_URL || '').replace(/\/$/, '');
-const ALLOWED_REPOS = new Set(
+const ALLOWED_REPOS = new Set<string>(
   (process.env.ALLOWED_REPOS || '')
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean)
 );
+// Repos Claude may WRITE to (commit, delete, create branches). Same syntax as
+// ALLOWED_REPOS. When unset it falls back to ALLOWED_REPOS (the old behaviour),
+// so existing deployments keep working; set it to narrow write access below
+// read access.
+const WRITE_REPOS_RAW = (process.env.WRITE_REPOS || '').trim();
+const WRITE_REPOS = WRITE_REPOS_RAW
+  ? new Set<string>(
+      WRITE_REPOS_RAW.split(',')
+        .map((s) => s.trim())
+        .filter(Boolean)
+    )
+  : ALLOWED_REPOS;
+// By default writes to a repo's default branch are refused, so changes arrive
+// on a branch and get reviewed (e.g. via a pull request).
+const ALLOW_DEFAULT_BRANCH_WRITES = process.env.ALLOW_DEFAULT_BRANCH_WRITES === 'true';
 const ALLOWED_REDIRECT_HOSTS = new Set(
   (process.env.ALLOWED_REDIRECT_HOSTS || 'claude.ai')
     .split(',')
@@ -112,6 +127,15 @@ if (!BASE_URL) {
 if (ALLOWED_REPOS.size === 0) {
   console.error('FATAL: ALLOWED_REPOS env var is required, e.g. "owner/repo,owner/repo2".');
   process.exit(1);
+}
+if (ALLOWED_REPOS.has('*')) {
+  console.warn('WARN: ALLOWED_REPOS="*" lets Claude read every repo the token can reach. Prefer "owner/*" or an explicit list.');
+}
+if (WRITE_REPOS.has('*')) {
+  console.warn('WARN: write access covers every repo the token can reach. Set WRITE_REPOS to a narrow list (default branches stay protected unless ALLOW_DEFAULT_BRANCH_WRITES=true).');
+}
+if (ALLOW_DEFAULT_BRANCH_WRITES) {
+  console.warn('WARN: ALLOW_DEFAULT_BRANCH_WRITES=true: Claude can commit straight to default branches.');
 }
 if (!process.env.MCP_JWT_SECRET) {
   console.warn('WARN: MCP_JWT_SECRET is not set; signing tokens with MCP_ADMIN_SECRET. Set a separate value for better isolation.');
@@ -244,6 +268,14 @@ function validateAuthRequest(clientId, redirectUri) {
   return null;
 }
 
+// PKCE is mandatory and S256-only: this is a public client (no client secret),
+// so PKCE is what stops a stolen authorization code from being redeemed.
+function validatePkceParams(codeChallenge, method) {
+  if (!codeChallenge) return 'code_challenge_required';
+  if (method !== 'S256') return 'code_challenge_method_must_be_S256';
+  return null;
+}
+
 function isAcceptableRedirectUri(uri) {
   try {
     const u = new URL(uri);
@@ -373,15 +405,53 @@ function githubRequest(method, path, body?): Promise<{ status: number; body: any
   });
 }
 
+// Exact "owner/repo" match, org-wide "owner/*" match, or global "*" match.
+function repoListAllows(list: Set<string>, owner, repo) {
+  return list.has(`${owner}/${repo}`) || list.has(`${owner}/*`) || list.has('*');
+}
+
 function assertRepoAllowed(owner, repo) {
   const key = `${owner}/${repo}`;
-  // Exact "owner/repo" match, org-wide "owner/*" match, or global "*" match.
-  const allowed =
-    ALLOWED_REPOS.has(key) ||
-    ALLOWED_REPOS.has(`${owner}/*`) ||
-    ALLOWED_REPOS.has('*');
-  if (!allowed) {
+  if (!repoListAllows(ALLOWED_REPOS, owner, repo)) {
     const err: any = new Error(`Repo "${key}" is not in ALLOWED_REPOS for this bridge.`);
+    err.isToolError = true;
+    throw err;
+  }
+}
+
+// Default branch per repo, cached briefly so a burst of writes costs one lookup.
+const defaultBranchCache = new Map<string, { branch: string; at: number }>();
+const DEFAULT_BRANCH_TTL_MS = 5 * 60 * 1000;
+
+async function getDefaultBranch(owner, repo): Promise<string> {
+  const key = `${owner}/${repo}`.toLowerCase();
+  const hit = defaultBranchCache.get(key);
+  if (hit && Date.now() - hit.at < DEFAULT_BRANCH_TTL_MS) return hit.branch;
+  const res = await githubRequest('GET', `/repos/${owner}/${repo}`);
+  if (res.status >= 400) throw new Error(`GitHub error ${res.status}: ${JSON.stringify(res.body)}`);
+  defaultBranchCache.set(key, { branch: res.body.default_branch, at: Date.now() });
+  return res.body.default_branch;
+}
+
+// Gate for every tool that changes a repo. Commits and deletes pass their
+// `branch` so direct writes to the default branch can be refused (a missing
+// branch means GitHub would use the default branch, so it is refused too).
+// Pass `null` for writes that don't commit to a branch (create_branch).
+async function assertWriteAllowed(owner, repo, branch: string | null | undefined) {
+  assertRepoAllowed(owner, repo);
+  const key = `${owner}/${repo}`;
+  if (!repoListAllows(WRITE_REPOS, owner, repo)) {
+    const err: any = new Error(`Repo "${key}" is read-only: it is not in WRITE_REPOS for this bridge.`);
+    err.isToolError = true;
+    throw err;
+  }
+  if (branch === null || ALLOW_DEFAULT_BRANCH_WRITES) return;
+  const def = await getDefaultBranch(owner, repo);
+  if (!branch || String(branch) === def) {
+    const err: any = new Error(
+      `Direct writes to the default branch "${def}" of ${key} are blocked. Create a branch (create_branch), commit there, and open a pull request. ` +
+        `(Set ALLOW_DEFAULT_BRANCH_WRITES=true on the server to allow this.)`
+    );
     err.isToolError = true;
     throw err;
   }
@@ -460,7 +530,7 @@ const TOOLS: any[] = [
       required: ['owner', 'repo', 'path', 'content', 'message', 'branch'],
     },
     handler: async ({ owner, repo, path: p, content, message, branch, sha }) => {
-      assertRepoAllowed(owner, repo);
+      await assertWriteAllowed(owner, repo, branch);
       const body = {
         message,
         branch,
@@ -488,7 +558,7 @@ const TOOLS: any[] = [
       required: ['owner', 'repo', 'path', 'message', 'branch', 'sha'],
     },
     handler: async ({ owner, repo, path: p, message, branch, sha }) => {
-      assertRepoAllowed(owner, repo);
+      await assertWriteAllowed(owner, repo, branch);
       const res = await githubRequest('DELETE', `/repos/${owner}/${repo}/contents/${encodePath(p)}`, {
         message,
         branch,
@@ -527,7 +597,7 @@ const TOOLS: any[] = [
       required: ['owner', 'repo', 'branch'],
     },
     handler: async ({ owner, repo, branch, from_branch }) => {
-      assertRepoAllowed(owner, repo);
+      await assertWriteAllowed(owner, repo, null);
       let base = from_branch;
       if (!base) {
         const repoRes = await githubRequest('GET', `/repos/${owner}/${repo}`);
@@ -567,7 +637,7 @@ const TOOLS: any[] = [
       required: ['owner', 'repo', 'branch', 'message', 'files'],
     },
     handler: async ({ owner, repo, branch, message, files }) => {
-      assertRepoAllowed(owner, repo);
+      await assertWriteAllowed(owner, repo, branch);
       const refRes = await githubRequest('GET', `/repos/${owner}/${repo}/git/ref/heads/${encodeURIComponent(branch)}`);
       if (refRes.status >= 400) throw new Error(`GitHub error ${refRes.status}: ${JSON.stringify(refRes.body)}`);
       const baseCommitSha = refRes.body.object.sha;
@@ -671,7 +741,7 @@ function handleAuthServerMetadata(req, res) {
     registration_endpoint: `${BASE_URL}/register`,
     response_types_supported: ['code'],
     grant_types_supported: ['authorization_code', 'refresh_token'],
-    code_challenge_methods_supported: ['S256', 'plain'],
+    code_challenge_methods_supported: ['S256'],
     token_endpoint_auth_methods_supported: ['none', 'client_secret_post'],
   });
 }
@@ -739,7 +809,7 @@ function handleAuthorizeGet(req, res, query) {
   const codeChallengeMethod = query.get('code_challenge_method') || '';
 
   // Reject bad requests before ever showing the password form.
-  const invalid = validateAuthRequest(clientId, redirectUri);
+  const invalid = validateAuthRequest(clientId, redirectUri) || validatePkceParams(codeChallenge, codeChallengeMethod);
   if (invalid) {
     sendJson(res, 400, { error: 'invalid_request', error_description: invalid });
     return;
@@ -773,7 +843,15 @@ button{padding:10px 16px;cursor:pointer}
   <button type="submit">Authorize</button>
 </form>
 </body></html>`;
-  res.writeHead(200, { 'Content-Type': 'text/html', 'Content-Length': Buffer.byteLength(html) });
+  res.writeHead(200, {
+    'Content-Type': 'text/html; charset=utf-8',
+    'Content-Length': Buffer.byteLength(html),
+    // The password form must never be framed (clickjacking) or cached.
+    'Content-Security-Policy': "frame-ancestors 'none'",
+    'X-Frame-Options': 'DENY',
+    'Cache-Control': 'no-store',
+    'Referrer-Policy': 'no-referrer',
+  });
   res.end(html);
 }
 
@@ -796,9 +874,9 @@ async function handleAuthorizePost(req, res) {
   const state = params.get('state') || '';
   const clientId = params.get('client_id') || '';
   const codeChallenge = params.get('code_challenge') || '';
-  const codeChallengeMethod = params.get('code_challenge_method') || 'plain';
+  const codeChallengeMethod = params.get('code_challenge_method') || '';
 
-  const invalid = validateAuthRequest(clientId, redirectUri);
+  const invalid = validateAuthRequest(clientId, redirectUri) || validatePkceParams(codeChallenge, codeChallengeMethod);
   if (invalid) {
     sendJson(res, 400, { error: 'invalid_request', error_description: invalid });
     return;
@@ -817,6 +895,7 @@ async function handleAuthorizePost(req, res) {
     codeChallenge,
     codeChallengeMethod,
     clientId,
+    redirectUri,
   });
 
   const location = new URL(redirectUri);
@@ -828,15 +907,16 @@ async function handleAuthorizePost(req, res) {
 }
 
 function verifyPkce(entry, codeVerifier) {
-  if (!entry.codeChallenge) return true; // client didn't use PKCE
+  // PKCE is mandatory (enforced when the code is issued); a code without a
+  // challenge, or with any method but S256, is never redeemable.
+  if (!entry.codeChallenge || entry.codeChallengeMethod !== 'S256') return false;
   if (!codeVerifier) return false;
-  if (entry.codeChallengeMethod === 'S256') {
-    const hash = crypto.createHash('sha256').update(codeVerifier).digest('base64url');
-    return safeEqual(hash, entry.codeChallenge);
-  }
-  // 'plain'
-  return safeEqual(codeVerifier, entry.codeChallenge);
+  const hash = crypto.createHash('sha256').update(codeVerifier).digest('base64url');
+  return safeEqual(hash, entry.codeChallenge);
 }
+
+// Token responses must not be cached (RFC 6749 section 5.1).
+const NO_STORE = { 'Cache-Control': 'no-store', Pragma: 'no-cache' };
 
 async function handleToken(req, res) {
   const ip = clientIp(req);
@@ -857,7 +937,7 @@ async function handleToken(req, res) {
       sendJson(res, 400, { error: 'invalid_grant' });
       return;
     }
-    sendJson(res, 200, issueTokens());
+    sendJson(res, 200, issueTokens(), NO_STORE);
     return;
   }
 
@@ -873,6 +953,13 @@ async function handleToken(req, res) {
     return;
   }
 
+  // The code is bound to the client and redirect URI it was issued for
+  // (RFC 6749 section 4.1.3); a code redeemed for any other pair is refused.
+  if (params.get('client_id') !== entry.clientId || params.get('redirect_uri') !== entry.redirectUri) {
+    sendJson(res, 400, { error: 'invalid_grant', error_description: 'client_id or redirect_uri does not match the authorization request' });
+    return;
+  }
+
   const codeVerifier = params.get('code_verifier');
   if (!verifyPkce(entry, codeVerifier)) {
     sendJson(res, 400, { error: 'invalid_grant', error_description: 'PKCE verification failed' });
@@ -881,7 +968,7 @@ async function handleToken(req, res) {
 
   pendingCodes.delete(code); // single-use
 
-  sendJson(res, 200, issueTokens());
+  sendJson(res, 200, issueTokens(), NO_STORE);
 }
 
 // ---------------------------------------------------------------------------

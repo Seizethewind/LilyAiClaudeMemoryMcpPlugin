@@ -113,17 +113,24 @@ const COMPACT_COLS = `m.id, m.project, m.title, m.status, m.pinned, m.created_at
 
 function clean(v: unknown, max: number): { text: string | null; redactions: number } {
   if (v === undefined || v === null) return { text: null, redactions: 0 };
-  let s = String(v).trim();
+  const s = String(v).trim();
   if (!s) return { text: null, redactions: 0 };
-  if (s.length > max) s = s.slice(0, max) + ' …[truncated]';
+  // Redact BEFORE truncating: a secret straddling the cut would otherwise be
+  // shortened below its pattern's minimum length and be stored in part.
   const r = redact(s);
-  return { text: r.text, redactions: r.count };
+  const text = r.text.length > max ? r.text.slice(0, max) + ' …[truncated]' : r.text;
+  return { text, redactions: r.count };
 }
+
+const MAX_TAG = 40;
 
 function toTags(v: unknown): string | null {
   if (v === undefined || v === null) return null;
   const arr = Array.isArray(v) ? v : String(v).split(',');
-  const t = arr.map((x) => String(x).trim().toLowerCase()).filter(Boolean).slice(0, 12);
+  const t = arr
+    .map((x) => (clean(x, MAX_TAG).text ?? '').toLowerCase()) // redact first: patterns are case-sensitive
+    .filter(Boolean)
+    .slice(0, 12);
   return t.length ? t.join(',') : null;
 }
 

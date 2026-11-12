@@ -116,3 +116,23 @@ test('LIKE fallback when FTS5 is unavailable', async () => {
   assert.equal((await s.search({ query: 'fallback' })).count, 1);
   assert.match(await s.exportJsonl(), /fallback search works/);
 });
+
+test('a secret straddling the length cap is redacted, not stored in part', async () => {
+  const s = await fresh();
+  const secret = 'ghp_' + 'z'.repeat(36);
+  const { id } = await s.save({ prompt: 'a'.repeat(7990) + ' ' + secret });
+  const m = (await s.get({ id })).memories[0];
+  assert.ok(!m.prompt.includes('ghp_'), 'no fragment of the token may survive truncation');
+  assert.ok(m.prompt.includes('[REDACTED'), 'marker (possibly itself cut by the cap) replaces the token');
+  assert.ok(!m.prompt.includes('zzzz'));
+});
+
+test('tags and project are redacted too', async () => {
+  const s = await fresh();
+  const key = 'AKIA' + 'A'.repeat(16);
+  const { id } = await s.save({ prompt: 'x', tags: [key, 'ok'], project: 'ghp_' + 'q'.repeat(36) });
+  const m = (await s.get({ id })).memories[0];
+  assert.ok(!String(m.tags).toLowerCase().includes('akia'));
+  assert.ok(String(m.tags).includes('ok'));
+  assert.ok(!String(m.project).includes('ghp_'));
+});
