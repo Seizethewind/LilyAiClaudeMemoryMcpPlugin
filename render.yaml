@@ -15,8 +15,10 @@ services:
         sync: false
       - key: MCP_BASE_URL
         sync: false
-      - key: ALLOWED_REPOS
-        value: "*"
+      - key: ALLOWED_REPOS   # repos Claude may read, e.g. "Seizethewind/*"
+        sync: false
+      - key: WRITE_REPOS     # repos Claude may write to (optional; defaults to ALLOWED_REPOS)
+        sync: false
       - key: TURSO_DATABASE_URL
         sync: false
       - key: TURSO_AUTH_TOKEN

@@ -31,7 +31,9 @@ If Turso is missing/unreachable the GitHub tools still work and memory tools are
 ## Safety
 - Secrets (GitHub/OpenAI-style keys, JWTs such as Turso tokens, private keys, `*_TOKEN=` values) are redacted before saving. Redaction is pattern-based — not a guarantee.
 - Fields are capped at 8,000 characters.
-- `ALLOWED_REPOS=*` lets the PAT reach every repo it can. Narrower: `Seizethewind/*,UmakraftCircle/*`.
+- `ALLOWED_REPOS` is the read allowlist (`owner/repo`, `owner/*`, or `*`; avoid `*`, which lets the PAT reach every repo it can). `WRITE_REPOS` (same syntax, defaults to `ALLOWED_REPOS`) limits where Claude may commit, delete or create branches.
+- Writes straight to a repo's default branch are refused; Claude must `create_branch`, commit there and open a pull request. Set `ALLOW_DEFAULT_BRANCH_WRITES=true` to opt out.
+- OAuth requires PKCE (S256 only), and an authorization code only works for the client and redirect URI it was issued to.
 - Optional nightly backup: set `BACKUP_REPO` (a **private** repo) → memories exported as JSONL via the GitHub API.
 
 ## Develop
