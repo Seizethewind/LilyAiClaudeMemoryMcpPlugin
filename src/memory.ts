@@ -192,7 +192,17 @@ export class MemoryStore {
       sets.push(`${col} = ?`);
       args.push(c.text);
     };
+    if (a.result !== undefined && a.append_result !== undefined) throw new Error('pass either result or append_result, not both');
     text('result', a.result, MAX_FIELD);
+    if (a.append_result !== undefined) {
+      // Add to the existing result on a new line (capped at MAX_FIELD in total).
+      const c = clean(a.append_result, MAX_FIELD);
+      if (c.text) {
+        redactions += c.redactions;
+        sets.push(`result = substr(CASE WHEN result IS NULL OR result = '' THEN ? ELSE result || char(10) || ? END, 1, ${MAX_FIELD})`);
+        args.push(c.text, c.text);
+      }
+    }
     text('plan', a.plan, MAX_FIELD);
     if (a.title !== undefined) {
       const t = clean(a.title, MAX_TITLE);
@@ -232,7 +242,8 @@ export class MemoryStore {
       const run = (match: string) =>
         this.rows({
           sql: `SELECT ${COMPACT_COLS} FROM memories_fts f JOIN memories m ON m.id = f.rowid
-                WHERE memories_fts MATCH ? AND ${where} ORDER BY bm25(memories_fts) LIMIT ?`,
+                WHERE memories_fts MATCH ? AND ${where}
+                ORDER BY bm25(memories_fts, 10.0, 2.0, 1.0, 3.0, 5.0) LIMIT ?`, // columns: title, prompt, plan, result, tags
           args: [match, ...fargs, limit],
         });
       const quoted = tokens.map((t) => `"${t}"*`);
@@ -280,13 +291,26 @@ export class MemoryStore {
   async forget(a: any) {
     const id = clampInt(a.id, 0, 1, Number.MAX_SAFE_INTEGER);
     if (!id) throw new Error('id is required');
+    if (a.hard === true) {
+      // Erase the row (the FTS delete trigger removes it from the index). Entries
+      // that superseded it keep existing; just drop the dangling link.
+      await this.db.execute({ sql: 'UPDATE memories SET supersedes = NULL WHERE supersedes = ?', args: [id] });
+      const rs = await this.db.execute({ sql: 'DELETE FROM memories WHERE id = ?', args: [id] });
+      if (!((rs as any).rowsAffected ?? 1)) throw new Error(`memory ${id} not found`);
+      return {
+        id,
+        deleted: 'hard (erased from the database and excluded from future backups)',
+        note: 'Backups already written to GitHub still contain it in the repo history until that history is purged.',
+      };
+    }
     const rs = await this.db.execute({ sql: `UPDATE memories SET deleted_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND deleted_at IS NULL`, args: [id] });
     if (!((rs as any).rowsAffected ?? 1)) throw new Error(`memory ${id} not found`);
-    return { id, deleted: 'soft (kept in backups; hidden from search)' };
+    return { id, deleted: 'soft (hidden from search and left out of future backups; pass hard:true to erase the row)' };
   }
 
   async exportJsonl(): Promise<string> {
-    const rows = await this.rows({ sql: 'SELECT * FROM memories ORDER BY id' });
+    // Forgotten entries are not exported: a backup should not resurrect them.
+    const rows = await this.rows({ sql: 'SELECT * FROM memories WHERE deleted_at IS NULL ORDER BY id' });
     return rows.map((r) => JSON.stringify(r)).join('\n') + (rows.length ? '\n' : '');
   }
 }
@@ -329,7 +353,8 @@ export function buildMemoryTools(store: MemoryStore): Tool[] {
         type: 'object',
         properties: {
           id: { type: 'integer' },
-          result: { type: 'string' },
+          result: { type: 'string', description: 'Replaces the stored result (max 8,000 chars).' },
+          append_result: { type: 'string', description: 'Adds to the stored result on a new line instead of replacing it. Does not change the status.' },
           status: { type: 'string', enum: [...STATUSES], description: 'Defaults to "done" when a result is given.' },
           plan: { type: 'string' },
           title: { type: 'string' },
@@ -367,8 +392,12 @@ export function buildMemoryTools(store: MemoryStore): Tool[] {
     },
     {
       name: 'memory_forget',
-      description: 'Soft-delete an entry (hidden from search; still in backups). Only when the user asks.',
-      inputSchema: { type: 'object', properties: { id: { type: 'integer' } }, required: ['id'] },
+      description: 'Forget an entry. Default is a soft delete (hidden from search and left out of future backups); pass hard:true to erase the row. Only when the user asks.',
+      inputSchema: {
+        type: 'object',
+        properties: { id: { type: 'integer' }, hard: { type: 'boolean', description: 'Erase the row instead of hiding it.' } },
+        required: ['id'],
+      },
       handler: (a) => store.forget(a),
     },
   ];

@@ -888,6 +888,28 @@ async function handleToken(req, res) {
 // MCP JSON-RPC endpoint
 // ---------------------------------------------------------------------------
 
+const SUPPORTED_PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05'];
+
+// Behaviour hints so MCP clients can ask for confirmation sensibly (e.g. before
+// delete_file) and skip it for pure reads. Keyed by tool name so tools defined
+// in other modules get them too; tools not listed here get no annotations.
+const READ_ONLY = { readOnlyHint: true, openWorldHint: true };
+const TOOL_ANNOTATIONS: Record<string, Record<string, boolean>> = {
+  get_file_contents: READ_ONLY,
+  list_branches: READ_ONLY,
+  create_branch: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  create_or_update_file: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+  push_files: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+  delete_file: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+  get_breakdown_guide: { readOnlyHint: true, openWorldHint: false },
+  memory_search: { readOnlyHint: true, openWorldHint: false },
+  memory_timeline: { readOnlyHint: true, openWorldHint: false },
+  memory_get: { readOnlyHint: true, openWorldHint: false },
+  memory_save: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  memory_update: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  memory_forget: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+};
+
 async function handleMcp(req, res) {
   const token = getBearerToken(req);
   const claims = token ? verifyJwt(token, JWT_SECRET) : null;
@@ -912,15 +934,37 @@ async function handleMcp(req, res) {
     return;
   }
 
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload) || typeof payload.method !== 'string') {
+    sendJson(res, 400, { jsonrpc: '2.0', error: { code: -32600, message: 'Invalid Request' }, id: null });
+    return;
+  }
+
   const { id, method, params } = payload;
 
+  // Notifications (no id, e.g. notifications/initialized) get no JSON-RPC
+  // response: acknowledge with 202 and an empty body, as the Streamable HTTP
+  // transport specifies.
+  if (id === undefined || id === null) {
+    res.writeHead(202);
+    res.end();
+    return;
+  }
+
   try {
+    if (method === 'ping') {
+      sendJson(res, 200, { jsonrpc: '2.0', id, result: {} });
+      return;
+    }
+
     if (method === 'initialize') {
+      // Echo the client's protocol version when we support it, otherwise offer our newest.
+      const requested = params && params.protocolVersion;
+      const protocolVersion = SUPPORTED_PROTOCOL_VERSIONS.includes(requested) ? requested : SUPPORTED_PROTOCOL_VERSIONS[0];
       sendJson(res, 200, {
         jsonrpc: '2.0',
         id,
         result: {
-          protocolVersion: '2024-11-05',
+          protocolVersion,
           capabilities: { tools: {}, prompts: {} },
           serverInfo: { name: 'lily-github-mcp-bridge', version: '2.0.0' },
           instructions: [memoryStore ? MEMORY_INSTRUCTIONS : '', GUIDE_HINT].filter(Boolean).join('\n\n'),
@@ -933,7 +977,14 @@ async function handleMcp(req, res) {
       sendJson(res, 200, {
         jsonrpc: '2.0',
         id,
-        result: { tools: TOOLS.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })) },
+        result: {
+          tools: TOOLS.map(({ name, description, inputSchema }) => ({
+            name,
+            description,
+            inputSchema,
+            ...(TOOL_ANNOTATIONS[name] ? { annotations: TOOL_ANNOTATIONS[name] } : {}),
+          })),
+        },
       });
       return;
     }
@@ -954,6 +1005,10 @@ async function handleMcp(req, res) {
     }
 
     if (method === 'tools/call') {
+      if (!params || typeof params.name !== 'string') {
+        sendJson(res, 200, { jsonrpc: '2.0', id, error: { code: -32602, message: 'Invalid params: "name" is required' } });
+        return;
+      }
       const tool = TOOLS.find((t) => t.name === params.name);
       if (!tool) {
         sendJson(res, 200, { jsonrpc: '2.0', id, error: { code: -32601, message: `Unknown tool: ${params.name}` } });
