@@ -17,6 +17,7 @@ The server sends these instructions to Claude automatically on connect.
 ## Tools
 GitHub (unchanged): `get_file_contents`, `create_or_update_file`, `delete_file`, `list_branches`, `create_branch`, `push_files`.
 Memory: `memory_start`, `memory_repos`, `memory_save`, `memory_update`, `memory_search`, `memory_timeline`, `memory_get`, plus removal and housekeeping: `memory_forget`, `memory_wipe_repo`, `memory_trash`, `memory_restore`, `memory_lock_repo`, `memory_rename_repo`.
+Blueprint: `blueprint_get`, `blueprint_save`, `blueprint_history` (see below).
 
 Search/timeline return compact rows; `memory_get` returns full entries (keeps token use low).
 
@@ -28,6 +29,24 @@ Search/timeline return compact rows; `memory_get` returns full entries (keeps to
 5. **Keep-alive:** the built-in self-ping runs every 10 min (`SELF_PING=false` to disable). An external pinger (UptimeRobot) on `/health` is a good second layer.
 
 If Turso is missing/unreachable the GitHub tools still work and memory tools are simply not listed (see logs).
+
+## Blueprint
+Memory entries log each request. The **Blueprint** is the one living document per repository, updated in place, that says what the repository *is*:
+
+| Section | Holds |
+|---|---|
+| `overview` | what it is, stack, current state |
+| `architecture` | structure, components, data flow, build/run/deploy |
+| `implementation` | how the important parts work, in detail |
+| `logic` | why it is built this way (only reasons that are actually known) |
+| `tests` | how to run them, latest results with date/commit/command, what was *not* verified |
+| `improvements` | ranked next steps, bugs, risks |
+
+- `blueprint_get` returns an outline by default (cheap); pass `sections` for full text. `memory_start` reports whether a blueprint exists.
+- `blueprint_save` replaces (`sections`) or extends (`append`) sections; secrets are redacted, each section is capped at 20,000 characters. Pass `based_on` (commit SHA) and `base_version` so a concurrent edit is refused instead of overwritten.
+- Every save is snapshotted (last 10 per section, `blueprint_history`); to undo, save the old content again.
+- Forgetting or wiping memory never touches a blueprint. Claude cannot delete one: only the admin page can (phrase `DELETE BLUEPRINT owner/name`, refused while the repository is locked).
+- Stored in schema v3 (additive; existing databases upgrade automatically).
 
 ## Removing memory
 Three levels, each more protected than the one before it:

@@ -142,6 +142,36 @@ const V2_SQL = [
    )`,
 ];
 
+// Schema v3: one living Blueprint per repository (see the Blueprint section below).
+const V3_SQL = [
+  `CREATE TABLE IF NOT EXISTS blueprints (
+     repo       TEXT PRIMARY KEY,
+     version    INTEGER NOT NULL DEFAULT 0,
+     based_on   TEXT,
+     created_at TEXT NOT NULL DEFAULT (datetime('now')),
+     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+   )`,
+  `CREATE TABLE IF NOT EXISTS blueprint_sections (
+     repo       TEXT NOT NULL,
+     section    TEXT NOT NULL,
+     content    TEXT NOT NULL,
+     version    INTEGER NOT NULL,
+     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+     PRIMARY KEY (repo, section)
+   )`,
+  `CREATE TABLE IF NOT EXISTS blueprint_revisions (
+     id       INTEGER PRIMARY KEY AUTOINCREMENT,
+     repo     TEXT NOT NULL,
+     section  TEXT NOT NULL,
+     version  INTEGER NOT NULL,
+     content  TEXT NOT NULL,
+     based_on TEXT,
+     note     TEXT,
+     at       TEXT NOT NULL DEFAULT (datetime('now'))
+   )`,
+  `CREATE INDEX IF NOT EXISTS idx_blueprint_rev ON blueprint_revisions(repo, section, id)`,
+];
+
 // ---------------------------------------------------------------------------
 // Repositories: every entry belongs to exactly one, identified by owner/name
 // ---------------------------------------------------------------------------
@@ -261,7 +291,32 @@ export interface RepoSummary {
   entries: number;
   unfinished: number;
   in_trash: number;
+  /** Blueprint version, or null when the repository has no blueprint yet. */
+  blueprint: number | null;
 }
+
+/**
+ * A Blueprint is the one living document per repository: how it is made, why,
+ * what the tests said, and what to improve next. Memory entries record each
+ * request; the Blueprint records the repository itself and is updated in place.
+ */
+export const BLUEPRINT_SECTIONS = ['overview', 'architecture', 'implementation', 'logic', 'tests', 'improvements'] as const;
+export type BlueprintSection = (typeof BLUEPRINT_SECTIONS)[number];
+export const SECTION_GUIDE: Record<BlueprintSection, string> = {
+  overview: 'What the repository is and who it is for; stack and runtime in a few lines; current state (working / in progress / broken).',
+  architecture:
+    'How it is made: folder and module structure, components and how they connect, data flow and data model, external services, and how to install, build, run and deploy it.',
+  implementation:
+    'Detailed implementation: what each important file or module does and how, key functions, algorithms, protocols and the edge cases they handle, configuration and environment variables. Concrete enough to change it safely.',
+  logic:
+    'Why it is built this way: design decisions and their reasoning, trade-offs, alternatives rejected, invariants and security assumptions. Only reasons you know (from the code, docs or the user), never invented ones.',
+  tests:
+    'Test strategy and results: how to run the tests; the latest results with date, commit and exact command (pass/fail counts, failures); what was verified by actually running it and what was NOT verified; known gaps.',
+  improvements:
+    'Better improvements, ranked: what to change next and why, expected benefit and effort; known bugs, risks and tech debt. Remove an item once done and note it under tests or implementation.',
+};
+const MAX_SECTION = 20000;
+const MAX_REVISIONS = 10; // snapshots kept per section
 
 export class MemoryStore {
   ftsEnabled = false;
@@ -294,10 +349,21 @@ export class MemoryStore {
     await this.migrate();
   }
 
-  /** v2: entries become repository-scoped. Legacy "project" labels are folded into "general" (kept as a tag). */
   private async migrate(): Promise<void> {
     const v = await this.rows({ sql: 'SELECT MAX(version) AS v FROM schema_versions' });
-    if (Number(v[0]?.v ?? 0) >= 2) return;
+    const current = Number(v[0]?.v ?? 0);
+    if (current < 2) await this.migrateV2();
+    if (current < 3) await this.migrateV3();
+  }
+
+  /** v3: blueprints. Purely additive. */
+  private async migrateV3(): Promise<void> {
+    for (const sql of V3_SQL) await this.run(sql);
+    await this.run('INSERT OR IGNORE INTO schema_versions(version) VALUES (3)');
+  }
+
+  /** v2: entries become repository-scoped. Legacy "project" labels are folded into "general" (kept as a tag). */
+  private async migrateV2(): Promise<void> {
     for (const sql of V2_SQL) {
       try {
         await this.run(sql);
@@ -346,6 +412,27 @@ export class MemoryStore {
     return similarRepos(key, (await this.rows({ sql: 'SELECT repo, display FROM repos' })) as any);
   }
 
+  /**
+   * Opens a repository on first write. Repositories cannot have look-alike names:
+   * a typo must not silently open a second scope, so a new name that resembles an
+   * existing one is refused until the caller confirms it really is new.
+   */
+  private async resolveRepoForWrite(a: any, tool: string) {
+    const { key, display } = normalizeRepo(a.repo);
+    const existing = await this.repoRow(key);
+    if (!existing) {
+      const similar = await this.similar(key);
+      if (similar.length && a.confirm_new_repo !== true) {
+        throw new Error(
+          `"${display}" has no memory yet, but similar repositories do: ${similar.map((s) => `${s.repo} (${s.why})`).join('; ')}. ` +
+            `If you meant one of them, use its exact name. If this really is a new repository, call ${tool} again with confirm_new_repo: true.`
+        );
+      }
+      await this.run('INSERT OR IGNORE INTO repos(repo, display) VALUES (?, ?)', [key, display]);
+    }
+    return existing;
+  }
+
   private async touchRepo(key: string): Promise<void> {
     await this.run(`UPDATE repos SET last_active_at = datetime('now') WHERE repo = ?`, [key]);
   }
@@ -383,6 +470,7 @@ export class MemoryStore {
       by_status: Object.fromEntries(byStatus.map((r) => [r.status, Number(r.n)])),
       in_trash: Number(trash[0]?.n ?? 0),
       last_active: row.last_active_at ?? null,
+      blueprint: await this.blueprintBrief(key),
       unfinished,
       pinned,
       recent,
@@ -403,18 +491,7 @@ export class MemoryStore {
       const exists = await this.rows({ sql: 'SELECT id FROM memories WHERE id = ? AND deleted_at IS NULL', args: [supersedes] });
       if (!exists.length) throw new Error(`supersedes: memory ${supersedes} not found`);
     }
-    const existing = await this.repoRow(key);
-    if (!existing) {
-      // Repositories cannot have look-alike names: a typo must not silently open a second scope.
-      const similar = await this.similar(key);
-      if (similar.length && a.confirm_new_repo !== true) {
-        throw new Error(
-          `"${display}" has no memory yet, but similar repositories do: ${similar.map((s) => `${s.repo} (${s.why})`).join('; ')}. ` +
-            `If you meant one of them, use its exact name. If this really is a new repository, call memory_save again with confirm_new_repo: true.`
-        );
-      }
-      await this.run('INSERT OR IGNORE INTO repos(repo, display) VALUES (?, ?)', [key, display]);
-    }
+    const existing = await this.resolveRepoForWrite(a, 'memory_save');
     const rs = await this.run(
       `INSERT INTO memories (project,title,prompt,plan,tags,pinned,supersedes) VALUES (?,?,?,?,?,?,?)`,
       [key, title.text, prompt.text, plan.text, toTags(a.tags), a.pinned ? 1 : 0, supersedes]
@@ -480,7 +557,14 @@ export class MemoryStore {
     const rs = await this.run(`UPDATE memories SET ${sets.join(', ')} WHERE id = ? AND deleted_at IS NULL`, args);
     if (!affected(rs)) throw new Error(`memory ${id} not found`);
     await this.touchRepo(cur[0].project);
-    return { id, repo: cur[0].project, updated: true, status: status ?? 'unchanged', redactions };
+    const out: Record<string, unknown> = { id, repo: cur[0].project, updated: true, status: status ?? 'unchanged', redactions };
+    if (cur[0].project !== GENERAL && (status === 'done' || status === 'partial' || status === 'failed')) {
+      const hasBlueprint = (await this.rows({ sql: 'SELECT 1 AS x FROM blueprints WHERE repo = ?', args: [cur[0].project] })).length > 0;
+      out.blueprint_reminder = hasBlueprint
+        ? 'If this work changed how the repository is built, why, how it is tested, or what to improve next, update the affected blueprint sections (blueprint_save).'
+        : 'This repository has no blueprint yet. Create one with blueprint_save (blueprint_get lists what each section should hold).';
+    }
+    return out;
   }
 
   async search(a: any) {
@@ -558,7 +642,8 @@ export class MemoryStore {
       sql: `SELECT r.display AS repo, r.locked, r.last_active_at,
               (SELECT COUNT(*) FROM memories m WHERE m.project = r.repo AND m.deleted_at IS NULL) AS entries,
               (SELECT COUNT(*) FROM memories m WHERE m.project = r.repo AND m.deleted_at IS NULL AND m.status = 'planned') AS unfinished,
-              (SELECT COUNT(*) FROM memories m WHERE m.project = r.repo AND m.deleted_at IS NOT NULL) AS in_trash
+              (SELECT COUNT(*) FROM memories m WHERE m.project = r.repo AND m.deleted_at IS NOT NULL) AS in_trash,
+              (SELECT b.version FROM blueprints b WHERE b.repo = r.repo) AS blueprint
             FROM repos r ORDER BY COALESCE(r.last_active_at, r.created_at) DESC, r.repo LIMIT ?`,
       args: [limit],
     });
@@ -569,6 +654,7 @@ export class MemoryStore {
       entries: Number(r.entries),
       unfinished: Number(r.unfinished),
       in_trash: Number(r.in_trash),
+      blueprint: r.blueprint === null || r.blueprint === undefined ? null : Number(r.blueprint),
     }));
   }
 
@@ -728,9 +814,209 @@ export class MemoryStore {
     if (await this.repoRow(to.key)) throw new Error(`${to.display} already has memory. Repositories are never merged automatically.`);
     await this.run('INSERT INTO repos(repo, display, created_at, last_active_at) SELECT ?, ?, created_at, last_active_at FROM repos WHERE repo = ?', [to.key, to.display, from.key]);
     await this.run('UPDATE memories SET project = ? WHERE project = ?', [to.key, from.key]);
+    for (const table of ['blueprints', 'blueprint_sections', 'blueprint_revisions']) {
+      await this.run(`UPDATE ${table} SET repo = ? WHERE repo = ?`, [to.key, from.key]);
+    }
     await this.run('DELETE FROM repos WHERE repo = ?', [from.key]);
     await this.audit(actor, 'rename', from.key, { to: to.key });
     return { from: from.key, to: to.key, renamed: true };
+  }
+
+  // ---- blueprint: one living document per repository -------------------------
+
+  private blueprintRepo(input: unknown) {
+    const n = normalizeRepo(input);
+    if (n.key === GENERAL) throw new Error('A blueprint describes a repository ("owner/name"); "general" has none.');
+    return n;
+  }
+
+  private sectionName(v: unknown): BlueprintSection {
+    const name = String(v ?? '').trim().toLowerCase();
+    if (!(BLUEPRINT_SECTIONS as readonly string[]).includes(name)) throw new Error(`unknown section "${String(v).slice(0, 40)}". Sections: ${BLUEPRINT_SECTIONS.join(', ')}.`);
+    return name as BlueprintSection;
+  }
+
+  private sectionMap(v: unknown, param: string): Partial<Record<BlueprintSection, string>> {
+    if (v === undefined || v === null) return {};
+    if (typeof v !== 'object' || Array.isArray(v)) throw new Error(`${param} must be an object like { "tests": "..." }`);
+    const out: Partial<Record<BlueprintSection, string>> = {};
+    for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+      const name = this.sectionName(k);
+      if (typeof val !== 'string' || !val.trim()) throw new Error(`${param}.${name} must be a non-empty string`);
+      out[name] = val;
+    }
+    return out;
+  }
+
+  /** Short summary used by memory_start: does this repository have a blueprint, and what is in it? */
+  private async blueprintBrief(key: string) {
+    const bp = (await this.rows({ sql: 'SELECT version, based_on, updated_at FROM blueprints WHERE repo = ?', args: [key] }))[0];
+    if (!bp) {
+      return { exists: false, next: 'No blueprint yet. Once you understand how this repository is built, create one with blueprint_save.' };
+    }
+    const secs = await this.rows({ sql: 'SELECT section, length(content) AS chars FROM blueprint_sections WHERE repo = ?', args: [key] });
+    const present = secs.map((r) => String(r.section));
+    return {
+      exists: true,
+      version: Number(bp.version),
+      based_on: bp.based_on ?? null,
+      updated_at: bp.updated_at,
+      sections: BLUEPRINT_SECTIONS.filter((x) => present.includes(x)).map((x) => ({ section: x, chars: Number(secs.find((r) => r.section === x)!.chars) })),
+      missing: BLUEPRINT_SECTIONS.filter((x) => !present.includes(x)),
+      next: 'Read it with blueprint_get (outline first, then the sections you need) before working.',
+    };
+  }
+
+  /** Outline by default (cheap); pass sections to read their full text ("all" for everything). */
+  async getBlueprint(a: any) {
+    const { key, display } = this.blueprintRepo(a.repo);
+    const bp = (await this.rows({ sql: 'SELECT version, based_on, created_at, updated_at FROM blueprints WHERE repo = ?', args: [key] }))[0];
+    if (!bp) {
+      const repo = await this.repoRow(key);
+      return {
+        repo: repo?.display ?? display,
+        exists: false,
+        similar: repo ? [] : await this.similar(key),
+        section_guide: SECTION_GUIDE,
+        next: 'No blueprint yet. Create one with blueprint_save (sections, based_on = the commit you examined).',
+      };
+    }
+    const want: BlueprintSection[] =
+      a.sections === undefined || a.sections === null
+        ? []
+        : (Array.isArray(a.sections) ? a.sections : [a.sections]).flatMap((x: unknown) => (String(x).toLowerCase() === 'all' ? [...BLUEPRINT_SECTIONS] : [this.sectionName(x)]));
+    const secs = await this.rows({ sql: 'SELECT section, content, version, updated_at FROM blueprint_sections WHERE repo = ?', args: [key] });
+    const by = new Map(secs.map((r) => [String(r.section), r]));
+    const outline = BLUEPRINT_SECTIONS.filter((x) => by.has(x)).map((x) => {
+      const r = by.get(x)!;
+      return { section: x, chars: String(r.content).length, version: Number(r.version), updated_at: r.updated_at, preview: String(r.content).replace(/\s+/g, ' ').slice(0, 200) };
+    });
+    const repo = await this.repoRow(key);
+    return {
+      repo: repo?.display ?? display,
+      exists: true,
+      version: Number(bp.version),
+      based_on: bp.based_on ?? null,
+      created_at: bp.created_at,
+      updated_at: bp.updated_at,
+      outline,
+      missing: BLUEPRINT_SECTIONS.filter((x) => !by.has(x)),
+      content: want.length ? Object.fromEntries([...new Set(want)].map((x) => [x, by.get(x)?.content ?? null])) : undefined,
+      next: want.length
+        ? `When you save changes, pass base_version: ${Number(bp.version)} so a concurrent edit is detected.`
+        : 'Outline only. Call blueprint_get again with sections (e.g. ["architecture","tests"], or ["all"]) for the full text.',
+    };
+  }
+
+  /**
+   * Create or update sections. `sections` replaces a section; `append` adds to it.
+   * Every saved section is snapshotted so a bad edit can be recovered (blueprint_history).
+   */
+  async saveBlueprint(a: any) {
+    const { key, display } = this.blueprintRepo(a.repo);
+    const replace = this.sectionMap(a.sections, 'sections');
+    const append = this.sectionMap(a.append, 'append');
+    const both = Object.keys(replace).filter((k) => k in append);
+    if (both.length) throw new Error(`section ${both.join(', ')} is in both sections (replace) and append; use one`);
+    if (!Object.keys(replace).length && !Object.keys(append).length) {
+      throw new Error('nothing to save: pass sections (replace a section) and/or append (add to a section)');
+    }
+    const basedOn = a.based_on === undefined || a.based_on === null ? null : clean(a.based_on, 80).text;
+    const note = a.note === undefined || a.note === null ? null : clean(a.note, 200).text;
+
+    const cur = (await this.rows({ sql: 'SELECT version, based_on FROM blueprints WHERE repo = ?', args: [key] }))[0];
+    const curVersion = Number(cur?.version ?? 0);
+    if (a.base_version !== undefined && a.base_version !== null && Number(a.base_version) !== curVersion) {
+      throw new Error(
+        `The blueprint changed since you read it: you passed base_version ${a.base_version}, the current version is ${curVersion}. ` +
+          `Call blueprint_get for the current text, merge your changes into it, and save again with base_version ${curVersion}.`
+      );
+    }
+    const existing = new Map(
+      (await this.rows({ sql: 'SELECT section, content FROM blueprint_sections WHERE repo = ?', args: [key] })).map((r) => [String(r.section), String(r.content)])
+    );
+
+    let redactions = 0;
+    const next = new Map<BlueprintSection, string>();
+    for (const [name, raw] of [...Object.entries(replace), ...Object.entries(append)] as [BlueprintSection, string][]) {
+      const r = redact(raw.trim());
+      redactions += r.count;
+      const prev = existing.get(name) ?? '';
+      const text = name in append ? (prev ? `${prev}\n\n${r.text}` : r.text) : r.text;
+      if (text.length > MAX_SECTION) {
+        throw new Error(
+          `section "${name}" would be ${text.length} characters; the limit is ${MAX_SECTION}. ` +
+            (name in append ? 'Condense it and save it with sections (replace) instead of appending.' : 'Condense it.')
+        );
+      }
+      if (text !== prev) next.set(name, text);
+    }
+    if (!next.size) return { repo: display, version: curVersion, unchanged: true, note: 'Nothing changed; the blueprint already says this.' };
+
+    await this.resolveRepoForWrite(a, 'blueprint_save'); // creates the repository on first use, refusing look-alike names
+    await this.run('INSERT OR IGNORE INTO blueprints(repo, version) VALUES (?, 0)', [key]);
+    // Claim the next version atomically: of two concurrent saves, only one wins.
+    const claimed = await this.run(
+      `UPDATE blueprints SET version = version + 1, based_on = COALESCE(?, based_on), updated_at = datetime('now') WHERE repo = ? AND version = ?`,
+      [basedOn, key, curVersion]
+    );
+    if (!affected(claimed)) throw new Error('The blueprint was changed by someone else a moment ago. Call blueprint_get, merge, and save again.');
+    const version = curVersion + 1;
+    for (const [name, text] of next) {
+      await this.run(
+        `INSERT INTO blueprint_sections(repo, section, content, version) VALUES (?,?,?,?)
+         ON CONFLICT(repo, section) DO UPDATE SET content = excluded.content, version = excluded.version, updated_at = datetime('now')`,
+        [key, name, text, version]
+      );
+      await this.run('INSERT INTO blueprint_revisions(repo, section, version, content, based_on, note) VALUES (?,?,?,?,?,?)', [key, name, version, text, basedOn, note]);
+      await this.run(
+        `DELETE FROM blueprint_revisions WHERE repo = ? AND section = ? AND id NOT IN
+           (SELECT id FROM blueprint_revisions WHERE repo = ? AND section = ? ORDER BY id DESC LIMIT ${MAX_REVISIONS})`,
+        [key, name, key, name]
+      );
+    }
+    await this.touchRepo(key);
+    const present = new Set([...existing.keys(), ...next.keys()]);
+    return {
+      repo: display,
+      version,
+      created: !cur,
+      saved: BLUEPRINT_SECTIONS.filter((x) => next.has(x)),
+      based_on: basedOn ?? cur?.based_on ?? null,
+      redactions,
+      missing: BLUEPRINT_SECTIONS.filter((x) => !present.has(x)),
+    };
+  }
+
+  /** Earlier snapshots of a blueprint (newest first). To undo an edit, save an old snapshot's content again. */
+  async blueprintHistory(a: any) {
+    const { key, display } = this.blueprintRepo(a.repo);
+    const section = a.section ? this.sectionName(a.section) : null;
+    const limit = clampInt(a.limit, 10, 1, 30);
+    const bp = (await this.rows({ sql: 'SELECT version FROM blueprints WHERE repo = ?', args: [key] }))[0];
+    if (!bp) return { repo: display, exists: false, revisions: [] };
+    const rows = await this.rows({
+      sql: `SELECT version, section, based_on, note, at, length(content) AS chars${a.include_content ? ', content' : ''}
+            FROM blueprint_revisions WHERE repo = ? ${section ? 'AND section = ?' : ''} ORDER BY id DESC LIMIT ?`,
+      args: section ? [key, section, limit] : [key, limit],
+    });
+    return {
+      repo: display,
+      current_version: Number(bp.version),
+      keeps: `the last ${MAX_REVISIONS} snapshots of each section`,
+      count: rows.length,
+      revisions: rows.map((r) => ({ ...r, version: Number(r.version), chars: Number(r.chars) })),
+    };
+  }
+
+  /** Admin page only (no MCP tool): permanently deletes a repository's blueprint and its history. Refused for locked repositories. */
+  async deleteBlueprint(key: string, actor: Actor = 'admin') {
+    const repo = await this.repoRow(key);
+    if (repo?.locked) throw new Error(`${repo.display} is locked. Unlock it first.`);
+    if (!(await this.rows({ sql: 'SELECT 1 AS x FROM blueprints WHERE repo = ?', args: [key] })).length) throw new Error(`${key} has no blueprint`);
+    for (const table of ['blueprint_revisions', 'blueprint_sections', 'blueprints']) await this.run(`DELETE FROM ${table} WHERE repo = ?`, [key]);
+    await this.audit(actor, 'delete_blueprint', key);
+    return { repo: key, deleted: true };
   }
 
   // ---- admin level (never exposed as an MCP tool) --------------------------
@@ -785,7 +1071,7 @@ export class MemoryStore {
     // Entries that superseded an erased one keep existing; just drop the dangling link.
     await this.run(`UPDATE memories SET supersedes = NULL WHERE supersedes IN (SELECT id FROM memories WHERE ${cond})`, args);
     await this.run(`DELETE FROM memories WHERE ${cond}`, args); // the FTS delete trigger clears the search index
-    await this.run(`DELETE FROM repos WHERE repo <> '${GENERAL}' AND locked = 0 AND NOT EXISTS (SELECT 1 FROM memories WHERE memories.project = repos.repo)`);
+    await this.run(`DELETE FROM repos WHERE repo <> '${GENERAL}' AND locked = 0 AND NOT EXISTS (SELECT 1 FROM memories WHERE memories.project = repos.repo) AND NOT EXISTS (SELECT 1 FROM blueprints WHERE blueprints.repo = repos.repo)`);
     return n;
   }
 
@@ -808,6 +1094,9 @@ export const MEMORY_INSTRUCTIONS =
   '(4) after the work call memory_update with the "result" (what actually happened, incl. failures) and a status. ' +
   'memory_repos lists repositories that have memory; memory_search / memory_timeline dig deeper; memory_get returns full entries. Never store secrets. ' +
   'Removal happens only when the user asks: memory_forget removes one entry (restorable from the trash); memory_wipe_repo empties one repository in two steps and needs the user\'s explicit confirmation of the preview. ' +
+  'Each repository also has one living Blueprint (blueprint_get / blueprint_save): how it is built, the reasoning behind it, test results and the best next improvements. ' +
+  'memory_start reports whether it exists. Read it before working (outline first), and after meaningful work update the affected sections in place, passing based_on (commit) and base_version. ' +
+  'Record only what you verified: never invent reasons or claim test results you did not run. Forgetting or wiping memory never touches the blueprint; only the user deletes one, from the admin page. ' +
   'There is deliberately no tool to wipe all memory: the user does that from the server\'s admin page.';
 
 export function buildMemoryTools(store: MemoryStore): Tool[] {
@@ -934,6 +1223,49 @@ export function buildMemoryTools(store: MemoryStore): Tool[] {
       description: 'Fix a repository saved under a wrong name (typo) or renamed on GitHub: moves all its entries to the new name. Refuses if the new name already has memory (no automatic merging) or the repository is locked.',
       inputSchema: { type: 'object', properties: { from: { type: 'string' }, to: { type: 'string' } }, required: ['from', 'to'] },
       handler: (a) => store.renameRepo(a),
+    },
+    {
+      name: 'blueprint_get',
+      description:
+        'Read the Blueprint of a repository: the living record of how it is built, the logic behind it, test results and next improvements. Default returns an outline (size, version, preview per section); pass sections (e.g. ["architecture","tests"] or ["all"]) for full text. Sections: ' +
+        BLUEPRINT_SECTIONS.join(', ') + '. If none exists, returns what each section should contain.',
+      inputSchema: {
+        type: 'object',
+        properties: { repo, sections: { type: 'array', items: { type: 'string', enum: [...BLUEPRINT_SECTIONS, 'all'] } } },
+        required: ['repo'],
+      },
+      handler: (a) => store.getBlueprint(a),
+    },
+    {
+      name: 'blueprint_save',
+      description:
+        'Create or update sections of a repository\'s Blueprint. "sections" replaces whole sections; "append" adds to them. Only write what you verified from the code, tests or the user; keep each section under ' + MAX_SECTION +
+        ' characters. Pass based_on (the commit SHA you examined) and base_version (the version you read) so concurrent edits are detected. Earlier versions are kept (blueprint_history). ' +
+        Object.entries(SECTION_GUIDE).map(([k, v]) => `${k}: ${v}`).join(' | '),
+      inputSchema: {
+        type: 'object',
+        properties: {
+          repo,
+          sections: { type: 'object', description: 'Replace sections: { "tests": "text", ... }', additionalProperties: { type: 'string' } },
+          append: { type: 'object', description: 'Append to sections: { "improvements": "text", ... }', additionalProperties: { type: 'string' } },
+          based_on: { type: 'string', description: 'Commit SHA (or ref) this blueprint reflects.' },
+          base_version: { type: 'integer', description: 'Version from blueprint_get; the save is refused if the blueprint changed since.' },
+          note: { type: 'string', description: 'One line on what changed and why.' },
+          confirm_new_repo: { type: 'boolean', description: 'Only when the repository is new and a similar name exists.' },
+        },
+        required: ['repo'],
+      },
+      handler: (a) => store.saveBlueprint(a),
+    },
+    {
+      name: 'blueprint_history',
+      description: 'Earlier snapshots of a Blueprint (last 10 per section). To undo an edit, read the old content (include_content: true) and save it again.',
+      inputSchema: {
+        type: 'object',
+        properties: { repo, section: { type: 'string', enum: [...BLUEPRINT_SECTIONS] }, limit: { type: 'integer' }, include_content: { type: 'boolean' } },
+        required: ['repo'],
+      },
+      handler: (a) => store.blueprintHistory(a),
     },
   ];
 }

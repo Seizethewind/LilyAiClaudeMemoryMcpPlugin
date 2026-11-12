@@ -324,7 +324,7 @@ test('an existing database is migrated: free-form projects fold into "general", 
   assert.equal((await store.search({ query: 'turso' })).count, 1);
   assert.equal((await store.search({ query: 'turso', repo: 'general' })).count, 1);
   assert.equal((await store.start({ repo: 'seizethewind/lilyai' }) as any).entries, 1);
-  assert.equal((raw.prepare('SELECT MAX(version) AS v FROM schema_versions').get() as any).v, 2);
+  assert.equal((raw.prepare('SELECT MAX(version) AS v FROM schema_versions').get() as any).v, 3);
 
   // running it again changes nothing
   const again = new MemoryStore(db);
