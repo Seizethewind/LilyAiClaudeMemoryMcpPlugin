@@ -15,7 +15,7 @@ The server sends these instructions to Claude automatically on connect.
 
 ## Tools
 GitHub (unchanged): `get_file_contents`, `create_or_update_file`, `delete_file`, `list_branches`, `create_branch`, `push_files`.
-Memory: `memory_save`, `memory_update`, `memory_search`, `memory_timeline`, `memory_get`, `memory_forget` (soft delete).
+Memory: `memory_save`, `memory_update`, `memory_search`, `memory_timeline`, `memory_get`, `memory_forget` (soft delete by default; `hard: true` erases the row).
 
 Search/timeline return compact rows; `memory_get` returns full entries (keeps token use low).
 
