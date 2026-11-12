@@ -63,6 +63,7 @@
 
 import { MemoryStore, buildMemoryTools, MEMORY_INSTRUCTIONS } from './memory';
 import { openTurso } from './db';
+import { createMemoryAdmin } from './memory-admin';
 import { buildGuideTools, PROMPTS, getPrompt, GUIDE_HINT } from './guide';
 
 const http = require('http');
@@ -332,6 +333,8 @@ const authorizeLimiter = makeRateLimiter({ windowMs: 15 * 60 * 1000, maxPerIp: 5
 // these just cap raw request volume per IP to blunt automated abuse/spam.
 const registerLimiter = makeRateLimiter({ windowMs: 15 * 60 * 1000, maxPerIp: 20, maxGlobal: 100 });
 const tokenLimiter = makeRateLimiter({ windowMs: 15 * 60 * 1000, maxPerIp: 30, maxGlobal: 150 });
+// /admin/memory sign-in: wrong-secret attempts, same budget as /authorize.
+const adminLimiter = makeRateLimiter({ windowMs: 15 * 60 * 1000, maxPerIp: 5, maxGlobal: 20 });
 
 // ---------------------------------------------------------------------------
 // GitHub REST API helper
@@ -902,19 +905,27 @@ const TOOL_ANNOTATIONS: Record<string, Record<string, boolean>> = {
   push_files: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
   delete_file: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
   get_breakdown_guide: { readOnlyHint: true, openWorldHint: false },
+  memory_start: { readOnlyHint: true, openWorldHint: false },
+  memory_repos: { readOnlyHint: true, openWorldHint: false },
   memory_search: { readOnlyHint: true, openWorldHint: false },
   memory_timeline: { readOnlyHint: true, openWorldHint: false },
   memory_get: { readOnlyHint: true, openWorldHint: false },
+  memory_trash: { readOnlyHint: true, openWorldHint: false },
   memory_save: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   memory_update: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-  memory_forget: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+  memory_restore: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  memory_lock_repo: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  memory_rename_repo: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  memory_forget: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+  memory_wipe_repo: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
 };
 
 async function handleMcp(req, res) {
   const token = getBearerToken(req);
   const claims = token ? verifyJwt(token, JWT_SECRET) : null;
-  // Refresh tokens must never be usable as access tokens.
-  if (!claims || claims.typ === 'refresh') {
+  // Only access tokens may call /mcp: refresh tokens and the admin page's
+  // session cookie are signed with the same secret and must never work here.
+  if (!claims || claims.typ !== 'access') {
     // Point the client at our protected-resource metadata so it knows
     // where to go to authenticate (required for MCP OAuth discovery).
     res.writeHead(401, {
@@ -1018,7 +1029,7 @@ async function handleMcp(req, res) {
       // Not a persisted audit log (stdout only, subject to Render's log
       // retention) but enough to answer "who touched what repo, and when" by
       // grepping deploy logs after the fact.
-      const target = args.owner && args.repo ? `${args.owner}/${args.repo}` : '-';
+      const target = args.owner && args.repo ? `${args.owner}/${args.repo}` : typeof args.repo === 'string' ? args.repo.slice(0, 100) : '-';
       const logLine = `[tools/call] ${new Date().toISOString()} ip=${clientIp(req)} tool=${params.name} repo=${target}`;
       try {
         const result = await tool.handler(args);
@@ -1048,6 +1059,20 @@ async function handleMcp(req, res) {
 // ---------------------------------------------------------------------------
 // Server
 // ---------------------------------------------------------------------------
+
+// Server-wide memory operations (wipe all, erase trash, unlock) live on this
+// page only; no MCP tool exposes them. Needs the admin secret, typed by a person.
+const memoryAdmin = createMemoryAdmin({
+  store: () => memoryStore,
+  checkSecret: (candidate) => !!ADMIN_SECRET && safeEqual(candidate, ADMIN_SECRET),
+  safeEqual,
+  sign: (payload, seconds) => signJwt(payload, JWT_SECRET, seconds),
+  verify: (token) => verifyJwt(token, JWT_SECRET),
+  readBody,
+  clientIp,
+  limiter: adminLimiter,
+  secureCookies: BASE_URL.startsWith('https://'),
+});
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
@@ -1097,6 +1122,7 @@ const server = http.createServer(async (req, res) => {
       await handleMcp(req, res);
       return;
     }
+    if (await memoryAdmin(req, res, url)) return;
     sendJson(res, 404, { error: 'not_found' });
   } catch (err) {
     if (err instanceof PayloadTooLargeError) {
@@ -1150,15 +1176,28 @@ async function initMemory() {
     return;
   }
   try {
-    const store = new MemoryStore(await openTurso());
+    const store = new MemoryStore(await openTurso(), { trashDays: Number(process.env.TRASH_RETENTION_DAYS || 30) });
     await store.init();
     memoryStore = store;
     TOOLS.push(...buildMemoryTools(store));
-    console.log(`[memory] ready (search: ${store.ftsEnabled ? 'FTS5' : 'LIKE fallback'}).`);
+    console.log(`[memory] ready (search: ${store.ftsEnabled ? 'FTS5' : 'LIKE fallback'}, trash kept ${store.trashDays} days).`);
+    scheduleTrashPurge(store);
     scheduleBackup(store);
   } catch (err: any) {
     console.error(`[memory] init failed, memory tools disabled: ${err.message}`);
   }
+}
+
+// Removed entries stay restorable for TRASH_RETENTION_DAYS (default 30), then
+// are erased for good. Checked at startup and daily.
+function scheduleTrashPurge(store: MemoryStore) {
+  const purge = () =>
+    store.purgeExpiredTrash().then(
+      (n) => n && console.log(`[memory] erased ${n} entries whose trash retention ended`),
+      (err: any) => console.error(`[memory] trash purge failed: ${err.message}`)
+    );
+  setTimeout(purge, 30 * 1000).unref();
+  setInterval(purge, 24 * 3600 * 1000).unref();
 }
 
 // Optional: back up all memories as JSONL into a (private!) GitHub repo.
