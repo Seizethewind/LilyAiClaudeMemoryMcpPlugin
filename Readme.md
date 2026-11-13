@@ -18,6 +18,7 @@ The server sends these instructions to Claude automatically on connect.
 GitHub (unchanged): `get_file_contents`, `create_or_update_file`, `delete_file`, `list_branches`, `create_branch`, `push_files`.
 Memory: `memory_start`, `memory_repos`, `memory_save`, `memory_update`, `memory_search`, `memory_timeline`, `memory_get`, plus removal and housekeeping: `memory_forget`, `memory_wipe_repo`, `memory_trash`, `memory_restore`, `memory_lock_repo`, `memory_rename_repo`.
 Blueprint: `blueprint_get`, `blueprint_save`, `blueprint_history` (see below).
+Sandboxes (optional, see [PandaStack sandboxes](#pandastack-sandboxes)): `sandbox_create`, `sandbox_exec`, `sandbox_browser_screenshot`, `sandbox_write_file`, `sandbox_read_file`, `sandbox_list_dir`, `sandbox_preview_url`, `sandbox_list`, `sandbox_get`, `sandbox_delete`, `sandbox_templates`.
 
 Search/timeline return compact rows; `memory_get` returns full entries (keeps token use low).
 
@@ -64,6 +65,23 @@ Things that make an accidental wipe recoverable:
 - The nightly backup leaves out removed entries, so a restore within the day is not lost either. Backups already pushed stay in that repository's git history.
 
 Upgrading from an older version is automatic: existing entries are kept; free-form project labels move to `general` (tagged `legacy-project:<old label>`), and old breakdown entries move under the repository they describe. Use `memory_rename_repo` to correct a name afterwards.
+
+## PandaStack sandboxes
+
+[PandaStack](https://docs.pandastack.ai) runs disposable Firecracker microVMs. With a token set, Claude can boot one (about 0.2 s from a snapshot), run shell commands in it, drive headless Chromium with Playwright, move files in and out, and expose a port.
+
+1. Create a token in the PandaStack dashboard (API Tokens) and set `PANDASTACK_API_KEY` on the server. Nothing is registered without it.
+2. Reconnect the connector so Claude sees the new `sandbox_*` tools.
+3. Ask for it, e.g. "open example.com in a sandbox and screenshot it". The default `browser` template has Chromium, Playwright, Node and Python preinstalled; `code-interpreter` and `base` also exist (`sandbox_templates` lists them).
+
+Guard rails (all env vars, see `.env.example`):
+
+- `SANDBOX_MAX_ACTIVE` (default 3) caps live sandboxes made by this bridge. They are tagged `metadata.source = "lily-mcp"`, so the cap never counts or touches anything else in your account.
+- Every sandbox has a lifetime: `SANDBOX_DEFAULT_TTL_SECONDS` (900), never above `SANDBOX_MAX_TTL_SECONDS` (3600). PandaStack deletes it when that runs out.
+- `sandbox_exec` is capped at 300 s per call and output is cut at 20,000 characters per stream. `sandbox_read_file` is cut at 2 MB.
+- Preview URLs are public to anyone holding the link; `sandbox_preview_url` says so every time.
+- The API key stays on this server and is never put in tool results or error text.
+- Self-hosted PandaStack: set `PANDASTACK_API_URL` and `PANDASTACK_PREVIEW_HOST`.
 
 ## Safety
 - Secrets (GitHub/OpenAI-style keys, JWTs such as Turso tokens, private keys, `*_TOKEN=` values) are redacted before saving. Redaction is pattern-based — not a guarantee.
