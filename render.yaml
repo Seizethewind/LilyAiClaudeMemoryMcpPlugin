@@ -23,3 +23,5 @@ services:
         sync: false
       - key: TURSO_AUTH_TOKEN
         sync: false
+      - key: PANDASTACK_API_KEY   # optional: enables the sandbox_* tools
+        sync: false
