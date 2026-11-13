@@ -23,3 +23,5 @@ services:
         sync: false
       - key: TURSO_AUTH_TOKEN
         sync: false
+      - key: PANDASTACK_API_KEY   # optional: enables the PandaStack tools; one key or comma-separated "k1,k2,k3" (rotated)
+        sync: false
