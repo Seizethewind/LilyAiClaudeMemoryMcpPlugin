@@ -66,6 +66,7 @@ import { openTurso } from './db';
 import { createMemoryAdmin } from './memory-admin';
 import { buildGuideTools, PROMPTS, getPrompt, GUIDE_HINT } from './guide';
 import { buildSandboxTools, SANDBOX_ANNOTATIONS, SANDBOX_HINT } from './sandbox';
+import { buildGithubTools, GITHUB_TOOL_ANNOTATIONS, GITHUB_HINT } from './github-tools';
 
 const http = require('http');
 const https = require('https');
@@ -373,8 +374,8 @@ const adminLimiter = makeRateLimiter({ windowMs: 15 * 60 * 1000, maxPerIp: 5, ma
 // GitHub REST API helper
 // ---------------------------------------------------------------------------
 
-function githubRequest(method, path, body?): Promise<{ status: number; body: any }> {
-  return new Promise<{ status: number; body: any }>((resolve, reject) => {
+function githubRequest(method, path, body?): Promise<{ status: number; body: any; headers?: any }> {
+  return new Promise<{ status: number; body: any; headers?: any }>((resolve, reject) => {
     const data = body ? JSON.stringify(body) : null;
     const req = https.request(
       {
@@ -399,7 +400,7 @@ function githubRequest(method, path, body?): Promise<{ status: number; body: any
           } catch (e) {
             parsed = raw;
           }
-          resolve({ status: res.statusCode, body: parsed });
+          resolve({ status: res.statusCode, body: parsed, headers: res.headers });
         });
       }
     );
@@ -685,6 +686,38 @@ const TOOLS: any[] = [
 
 // On-demand repo breakdown playbook (no analysis runs here; Claude does it).
 TOOLS.push(...buildGuideTools());
+
+// Pull requests, issues and Actions. Reads follow ALLOWED_REPOS, writes follow WRITE_REPOS.
+// Merging, approving and dispatching arbitrary workflows are deliberately not offered.
+function downloadTail(url: string, maxBytes: number): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    const req = https.get(url, { headers: { 'User-Agent': 'lily-github-mcp-bridge' } }, (res) => {
+      if (res.statusCode !== 200) {
+        res.resume();
+        reject(new Error(`log download failed: HTTP ${res.statusCode}`));
+        return;
+      }
+      const chunks: Buffer[] = [];
+      let size = 0;
+      res.on('data', (c) => {
+        chunks.push(c);
+        size += c.length;
+        while (size - chunks[0].length >= maxBytes) size -= chunks.shift()!.length; // keep only the tail
+      });
+      res.on('end', () => resolve(Buffer.concat(chunks).toString('utf8').slice(-maxBytes)));
+      res.on('error', reject);
+    });
+    req.on('error', reject);
+    req.setTimeout(30_000, () => req.destroy(new Error('log download timed out')));
+  });
+}
+const GITHUB_TOOLS = buildGithubTools({
+  request: githubRequest,
+  assertRead: assertRepoAllowed,
+  assertWrite: assertWriteAllowed,
+  download: downloadTail,
+});
+TOOLS.push(...GITHUB_TOOLS);
 
 // PandaStack microVM sandboxes (browser/Playwright, exec, files). Only registered
 // when PANDASTACK_API_KEY is set; otherwise this adds nothing.
@@ -1017,6 +1050,7 @@ const TOOL_ANNOTATIONS: Record<string, Record<string, boolean>> = {
   memory_forget: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
   memory_wipe_repo: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
   ...SANDBOX_ANNOTATIONS,
+  ...GITHUB_TOOL_ANNOTATIONS,
 };
 
 async function handleMcp(req, res) {
@@ -1077,7 +1111,7 @@ async function handleMcp(req, res) {
           protocolVersion,
           capabilities: { tools: {}, prompts: {} },
           serverInfo: { name: 'lily-github-mcp-bridge', version: '2.0.0' },
-          instructions: [memoryStore ? MEMORY_INSTRUCTIONS : '', GUIDE_HINT, SANDBOX_TOOLS.length ? SANDBOX_HINT : ''].filter(Boolean).join('\n\n'),
+          instructions: [memoryStore ? MEMORY_INSTRUCTIONS : '', GUIDE_HINT, GITHUB_HINT, SANDBOX_TOOLS.length ? SANDBOX_HINT : ''].filter(Boolean).join('\n\n'),
         },
       });
       return;
