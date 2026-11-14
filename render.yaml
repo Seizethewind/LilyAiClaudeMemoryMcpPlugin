@@ -25,3 +25,5 @@ services:
         sync: false
       - key: PANDASTACK_API_KEY   # optional: enables the PandaStack tools; one key or comma-separated "k1,k2,k3" (rotated)
         sync: false
+      - key: TAVILY_API_KEY   # optional: Tavily web search; one key or comma-separated "k1,k2" (rotated)
+        sync: false

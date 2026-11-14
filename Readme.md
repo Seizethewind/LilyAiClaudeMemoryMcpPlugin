@@ -81,11 +81,21 @@ Things that make an accidental wipe recoverable:
 
 Upgrading from an older version is automatic: existing entries are kept; free-form project labels move to `general` (tagged `legacy-project:<old label>`), and old breakdown entries move under the repository they describe. Use `memory_rename_repo` to correct a name afterwards.
 
+## Tavily web search
+[Tavily](https://tavily.com) is a search API built for LLMs. With a key set, Claude gets `web_search` (ranked results, a short answer, optional page text, news/finance topics, time ranges, domain filters) and `web_extract` (full text of up to 5 URLs).
+
+1. Create a key at tavily.com and set `TAVILY_API_KEY` on Render. Nothing is registered without it.
+2. **Several keys:** `TAVILY_API_KEY=k1,k2,k3` rotates like PandaStack (k1, k2, k3, k1, ...). A key that is rejected (401/403) rests 10 minutes; one that hit its rate limit (429) or its plan limit (432/433) is skipped for a while, and the call moves on to the next key at once. A 400 or 5xx is reported as it is, never retried on another key. Keys never appear in results or errors.
+3. Queries are sent to Tavily, so they are scrubbed of secrets first, and results are marked untrusted (web text is data, not instructions).
+4. When Tavily is on it owns `web_search`; the sandbox's browser-scraping `web_search` steps aside. Without a key the sandbox version remains the fallback. The sandbox `web_fetch` (runs JavaScript) stays for pages Tavily cannot render.
+
 ## PandaStack
 
 [PandaStack](https://docs.pandastack.ai) runs disposable Firecracker microVMs. With a key set, Claude can boot one (about 0.2 s from a snapshot), run commands and headless Chromium/Playwright in it, and use the rest of the platform.
 
 1. Create a token in the PandaStack dashboard (API Tokens) and set `PANDASTACK_API_KEY`. Nothing is registered without it.
+
+**Core tools by default.** Every tool's description is sent to Claude at the start of every session, and all 57 PandaStack tools cost roughly 5,500 tokens each time. By default only the 14 everyday tools are listed (`sandbox_create/list/get/delete/exec`, file read/write/list, `sandbox_preview_url`, `sandbox_browser_screenshot`, `web_fetch`, `web_search`, `pandastack_status`, and `pandastack_api`). Everything else (snapshots, forks, volumes, databases, apps, lifecycle, ports, templates) is still reachable on demand through `pandastack_api` with the REST path, e.g. `GET /v1/volumes`. Set `SANDBOX_TOOLSET=full` to list every tool.
 2. Reconnect the connector so Claude sees the new tools.
 
 **Several keys.** `PANDASTACK_API_KEY=k1,k2,k3` (any number) rotates in order: the first new job uses k1, the next k2, then k3, then k1 again. A sandbox, volume, snapshot, database or app stays with the key that created it, so follow-up calls use that key. A key that is rate limited, out of capacity or rejected is skipped for a while (10 minutes if rejected). Keys never appear in results or errors; `pandastack_status` shows slots (`key 2/3`) only. Keys from different accounts work too; lists (`sandbox_list`, `volume_list`, ...) merge all of them and show `key_slot`.
@@ -105,6 +115,8 @@ Upgrading from an older version is automatic: existing entries are kept; free-fo
 | Browser | `sandbox_browser_screenshot` |
 | Web | `web_search`, `web_fetch` |
 | Anything else | `pandastack_api` (any `/v1/...` endpoint) |
+
+The table lists all tools; in the default `core` toolset only the everyday ones are listed (see above).
 
 **Web search.** PandaStack has no search API of its own. `web_search` and `web_fetch` therefore run real headless Chromium inside a helper sandbox (one per API key, created on first use and reused; DuckDuckGo first, Bing as fallback). `web_search` can also read the text of the top results. It takes a few seconds per call, counts toward `SANDBOX_MAX_ACTIVE`, and a search engine may occasionally show a bot check.
 
