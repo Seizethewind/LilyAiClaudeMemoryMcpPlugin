@@ -34,6 +34,7 @@ for (const n of ['sandbox_delete', 'sandbox_write_file', 'sandbox_remove_path', 
 for (const n of ['sandbox_exec', 'database_query', 'pandastack_api']) SANDBOX_ANNOTATIONS[n] = DESTROY_ONCE;
 
 export const SANDBOX_HINT =
+  'PandaStack (sandbox_*, web_fetch, pandastack_*): disposable Firecracker microVMs. Use template "browser" for Chromium + Playwright. Create one, work in /workspace, then sandbox_delete it. Sandboxes expire on their own (ttl). web_fetch opens a page in Chromium (JavaScript runs) in a helper sandbox, so no sandbox id is needed. Only the everyday tools are listed; for anything else (snapshots, forks, volumes, databases, apps, lifecycle, ports) call pandastack_api with the REST path, e.g. GET /v1/volumes (the operator can list every tool with SANDBOX_TOOLSET=full). Several API keys may be configured; they rotate automatically and each resource stays with the key that made it. Preview URLs are public to anyone who has the link.';
   'PandaStack (sandbox_*, volume_*, database_*, app_*, web_* tools): disposable Firecracker microVMs. Use template "browser" for Chromium + Playwright. Create one, work in /workspace, then sandbox_delete it. Sandboxes expire on their own (ttl). web_search / web_fetch drive Chromium in a helper sandbox, so no sandbox id is needed. Several API keys may be configured; they rotate automatically and each resource stays with the key that made it. Preview URLs are public to anyone who has the link.';
 
 const ID_PROP = { type: 'string', description: 'Sandbox id returned by sandbox_create.' };

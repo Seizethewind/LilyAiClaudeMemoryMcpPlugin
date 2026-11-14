@@ -27,7 +27,22 @@
 import { ClientOptions, PandaStackClient, PandaStackError, assertAbsPath, assertId, parseKeys } from './pandastack/client';
 import { SANDBOX_ANNOTATIONS, SANDBOX_HINT, buildAllTools } from './pandastack/tools';
 
-export type SandboxOptions = ClientOptions;
+export type SandboxOptions = ClientOptions & {
+  /** "core" (default): the everyday tools plus pandastack_api for everything else. "full": every tool. */
+  toolset?: string;
+};
+
+/**
+ * The everyday set. Every tool's description is sent to Claude at the start of each session, so the
+ * full 57 cost roughly 5,500 tokens each time. The core set keeps what real work needs, and
+ * pandastack_api reaches every other PandaStack endpoint (snapshots, forks, volumes, databases, apps,
+ * lifecycle...) on demand, without carrying their definitions around. SANDBOX_TOOLSET=full lists all of them.
+ */
+export const CORE_SANDBOX_TOOLS = [
+  'pandastack_status', 'sandbox_create', 'sandbox_list', 'sandbox_get', 'sandbox_delete', 'sandbox_exec',
+  'sandbox_write_file', 'sandbox_read_file', 'sandbox_list_dir', 'sandbox_preview_url', 'sandbox_browser_screenshot',
+  'web_fetch', 'web_search', 'pandastack_api',
+];
 export { PandaStackClient, PandaStackError, assertAbsPath, assertId, parseKeys, SANDBOX_ANNOTATIONS, SANDBOX_HINT };
 
 export function sandboxOptionsFromEnv(env: NodeJS.ProcessEnv = process.env): SandboxOptions {
@@ -39,10 +54,12 @@ export function sandboxOptionsFromEnv(env: NodeJS.ProcessEnv = process.env): San
     maxActive: num(env.SANDBOX_MAX_ACTIVE),
     defaultTtlSeconds: num(env.SANDBOX_DEFAULT_TTL_SECONDS),
     maxTtlSeconds: num(env.SANDBOX_MAX_TTL_SECONDS),
+    toolset: (env.SANDBOX_TOOLSET || 'core').trim().toLowerCase(),
   };
 }
 
 export function buildSandboxTools(opts: SandboxOptions = sandboxOptionsFromEnv()): any[] {
   if (!parseKeys(opts.apiKey).length) return [];
-  return buildAllTools(new PandaStackClient(opts));
+  const all = buildAllTools(new PandaStackClient(opts));
+  return opts.toolset === 'full' ? all : all.filter((t) => CORE_SANDBOX_TOOLS.includes(t.name));
 }

@@ -21,7 +21,7 @@ function fake(handler: (c: Call, n: number) => [number, any, Record<string, stri
 
 const sleep = async () => {};
 const tools = (opts: any) => {
-  const list = buildSandboxTools({ apiKey: 'pds_secret', sleep, ...opts });
+  const list = buildSandboxTools({ apiKey: 'pds_secret', sleep, toolset: 'full', ...opts });
   return { list, by: (n: string) => list.find((t) => t.name === n)! };
 };
 
@@ -411,4 +411,25 @@ test('pandastack_status shows slots and limits, never keys', async () => {
   assert.ok(r.version.error);
   assert.ok(!JSON.stringify(r).includes('pds_secret'));
   assert.equal(f.calls.every((c) => c.headers.Authorization === undefined), true, 'health probes need no key');
+});
+
+test('core toolset is the default: everyday tools plus pandastack_api, a fraction of the full set', () => {
+  const core = buildSandboxTools({ apiKey: 'k' });
+  const full = buildSandboxTools({ apiKey: 'k', toolset: 'full' });
+  const names = core.map((t) => t.name);
+  for (const n of ['sandbox_create', 'sandbox_exec', 'sandbox_browser_screenshot', 'web_fetch', 'web_search', 'pandastack_api', 'sandbox_delete']) assert.ok(names.includes(n), n);
+  for (const n of ['sandbox_snapshot_create', 'sandbox_fork', 'volume_create', 'database_query', 'app_deploy']) assert.ok(!names.includes(n), `${n} stays out of core`);
+  assert.ok(core.length <= 16 && full.length >= 50, `${core.length} core vs ${full.length} full`);
+  assert.ok(JSON.stringify(core).length < JSON.stringify(full).length / 2);
+  assert.equal(sandboxOptionsFromEnv({ PANDASTACK_API_KEY: 'k' } as any).toolset, 'core');
+  assert.equal(sandboxOptionsFromEnv({ PANDASTACK_API_KEY: 'k', SANDBOX_TOOLSET: 'FULL' } as any).toolset, 'full');
+  for (const t of core) assert.ok(SANDBOX_ANNOTATIONS[t.name], `${t.name} annotated`);
+});
+
+test('core mode keeps everything reachable: pandastack_api can call any /v1 endpoint', async () => {
+  const f = fake(() => [200, [{ name: 'data' }]]);
+  const t = buildSandboxTools({ apiKey: 'k', fetchImpl: f.fetchImpl, sleep });
+  const api = t.find((x) => x.name === 'pandastack_api')!;
+  await api.handler({ method: 'GET', path: '/v1/volumes' });
+  assert.equal(f.calls[0].url.pathname, '/v1/volumes');
 });

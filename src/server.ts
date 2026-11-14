@@ -66,6 +66,7 @@ import { openTurso } from './db';
 import { createMemoryAdmin } from './memory-admin';
 import { buildGuideTools, PROMPTS, getPrompt, GUIDE_HINT } from './guide';
 import { buildSandboxTools, SANDBOX_ANNOTATIONS, SANDBOX_HINT } from './sandbox';
+import { buildTavilyTools, TAVILY_ANNOTATIONS, TAVILY_HINT } from './tavily';
 import { buildGithubTools, GITHUB_TOOL_ANNOTATIONS, GITHUB_HINT } from './github-tools';
 
 const http = require('http');
@@ -721,7 +722,13 @@ TOOLS.push(...GITHUB_TOOLS);
 
 // PandaStack microVM sandboxes (browser/Playwright, exec, files). Only registered
 // when PANDASTACK_API_KEY is set; otherwise this adds nothing.
-const SANDBOX_TOOLS = buildSandboxTools();
+// Tavily web search (optional, TAVILY_API_KEY, several keys rotate). When it is on, it owns web_search and
+// the sandbox's browser-scraping web_search steps aside; the sandbox's web_fetch (JavaScript pages) stays.
+const TAVILY_TOOLS = buildTavilyTools();
+TOOLS.push(...TAVILY_TOOLS);
+if (TAVILY_TOOLS.length) console.log('[tavily] web search enabled.');
+else console.warn('[tavily] TAVILY_API_KEY not set — using the sandbox browser for web_search (if PandaStack is configured).');
+const SANDBOX_TOOLS = buildSandboxTools().filter((t) => !(TAVILY_TOOLS.length && t.name === 'web_search'));
 TOOLS.push(...SANDBOX_TOOLS);
 if (SANDBOX_TOOLS.length) console.log(`[sandbox] PandaStack tools enabled (${SANDBOX_TOOLS.length}).`);
 else console.warn('[sandbox] PANDASTACK_API_KEY not set — sandbox tools disabled.');
@@ -1051,6 +1058,7 @@ const TOOL_ANNOTATIONS: Record<string, Record<string, boolean>> = {
   memory_wipe_repo: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
   ...SANDBOX_ANNOTATIONS,
   ...GITHUB_TOOL_ANNOTATIONS,
+  ...TAVILY_ANNOTATIONS,
 };
 
 async function handleMcp(req, res) {
@@ -1111,7 +1119,7 @@ async function handleMcp(req, res) {
           protocolVersion,
           capabilities: { tools: {}, prompts: {} },
           serverInfo: { name: 'lily-github-mcp-bridge', version: '2.0.0' },
-          instructions: [memoryStore ? MEMORY_INSTRUCTIONS : '', GUIDE_HINT, GITHUB_HINT, SANDBOX_TOOLS.length ? SANDBOX_HINT : ''].filter(Boolean).join('\n\n'),
+          instructions: [memoryStore ? MEMORY_INSTRUCTIONS : '', GUIDE_HINT, GITHUB_HINT, TAVILY_TOOLS.length ? TAVILY_HINT : '', SANDBOX_TOOLS.length ? SANDBOX_HINT : ''].filter(Boolean).join('\n\n'),
         },
       });
       return;
