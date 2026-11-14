@@ -65,6 +65,7 @@ import { MemoryStore, buildMemoryTools, MEMORY_INSTRUCTIONS } from './memory';
 import { openTurso } from './db';
 import { createMemoryAdmin } from './memory-admin';
 import { buildGuideTools, PROMPTS, getPrompt, GUIDE_HINT } from './guide';
+import { buildSandboxTools, SANDBOX_ANNOTATIONS, SANDBOX_HINT } from './sandbox';
 
 const http = require('http');
 const https = require('https');
@@ -685,6 +686,13 @@ const TOOLS: any[] = [
 // On-demand repo breakdown playbook (no analysis runs here; Claude does it).
 TOOLS.push(...buildGuideTools());
 
+// PandaStack microVM sandboxes (browser/Playwright, exec, files). Only registered
+// when PANDASTACK_API_KEY is set; otherwise this adds nothing.
+const SANDBOX_TOOLS = buildSandboxTools();
+TOOLS.push(...SANDBOX_TOOLS);
+if (SANDBOX_TOOLS.length) console.log(`[sandbox] PandaStack tools enabled (${SANDBOX_TOOLS.length}).`);
+else console.warn('[sandbox] PANDASTACK_API_KEY not set — sandbox tools disabled.');
+
 // ---------------------------------------------------------------------------
 // HTTP helpers
 // ---------------------------------------------------------------------------
@@ -1008,6 +1016,7 @@ const TOOL_ANNOTATIONS: Record<string, Record<string, boolean>> = {
   blueprint_history: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   memory_forget: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
   memory_wipe_repo: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+  ...SANDBOX_ANNOTATIONS,
 };
 
 async function handleMcp(req, res) {
@@ -1068,7 +1077,7 @@ async function handleMcp(req, res) {
           protocolVersion,
           capabilities: { tools: {}, prompts: {} },
           serverInfo: { name: 'lily-github-mcp-bridge', version: '2.0.0' },
-          instructions: [memoryStore ? MEMORY_INSTRUCTIONS : '', GUIDE_HINT].filter(Boolean).join('\n\n'),
+          instructions: [memoryStore ? MEMORY_INSTRUCTIONS : '', GUIDE_HINT, SANDBOX_TOOLS.length ? SANDBOX_HINT : ''].filter(Boolean).join('\n\n'),
         },
       });
       return;
