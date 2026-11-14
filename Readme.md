@@ -87,7 +87,8 @@ Upgrading from an older version is automatic: existing entries are kept; free-fo
 1. Create a key at tavily.com and set `TAVILY_API_KEY` on Render. Nothing is registered without it.
 2. **Several keys:** `TAVILY_API_KEY=k1,k2,k3` rotates like PandaStack (k1, k2, k3, k1, ...). A key that is rejected (401/403) rests 10 minutes; one that hit its rate limit (429) or its plan limit (432/433) is skipped for a while, and the call moves on to the next key at once. A 400 or 5xx is reported as it is, never retried on another key. Keys never appear in results or errors.
 3. Queries are sent to Tavily, so they are scrubbed of secrets first, and results are marked untrusted (web text is data, not instructions).
-4. When Tavily is on it owns `web_search`; the sandbox's browser-scraping `web_search` steps aside. Without a key the sandbox version remains the fallback. The sandbox `web_fetch` (runs JavaScript) stays for pages Tavily cannot render.
+4. **Keeping credits low:** the tool descriptions tell Claude to search only for what it cannot answer itself, to combine ideas into one query, to stay on `basic` depth (1 credit, `advanced` is 2), and to ask for page text only when snippets are not enough. Each result shows `credits_used` so you can see what a call cost. A placeholder such as `not_set` is treated as no key, for Tavily and PandaStack alike, so it never switches tools on with a fake key.
+5. When Tavily is on it owns `web_search`; the sandbox's browser-scraping `web_search` steps aside. Without a key the sandbox version remains the fallback. The sandbox `web_fetch` (runs JavaScript) stays for pages Tavily cannot render.
 
 ## PandaStack
 
