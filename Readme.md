@@ -18,6 +18,7 @@ The server sends these instructions to Claude automatically on connect.
 GitHub (unchanged): `get_file_contents`, `create_or_update_file`, `delete_file`, `list_branches`, `create_branch`, `push_files`.
 Memory: `memory_start`, `memory_repos`, `memory_save`, `memory_update`, `memory_search`, `memory_timeline`, `memory_get`, plus removal and housekeeping: `memory_forget`, `memory_wipe_repo`, `memory_trash`, `memory_restore`, `memory_lock_repo`, `memory_rename_repo`.
 Blueprint: `blueprint_get`, `blueprint_save`, `blueprint_history` (see below).
+Pull requests, issues, CI: `pr_list`, `pr_get`, `pr_create`, `pr_comment`, `pr_update`, `issue_list`, `issue_get`, `issue_create`, `issue_comment`, `issue_update`, `actions_runs`, `actions_run_get`, `actions_job_logs`, `actions_rerun` (see [GitHub tools](#github-tools)).
 PandaStack (optional, see [PandaStack](#pandastack)): sandboxes (`sandbox_*`), `web_search` / `web_fetch`, volumes, databases, apps and a generic `pandastack_api`.
 
 Search/timeline return compact rows; `memory_get` returns full entries (keeps token use low).
@@ -30,6 +31,20 @@ Search/timeline return compact rows; `memory_get` returns full entries (keeps to
 5. **Keep-alive:** the built-in self-ping runs every 10 min (`SELF_PING=false` to disable). An external pinger (UptimeRobot) on `/health` is a good second layer.
 
 If Turso is missing/unreachable the GitHub tools still work and memory tools are simply not listed (see logs).
+
+## GitHub tools
+Beyond files and branches, Claude can work the whole review loop: push a branch, open a pull request, read the CI result and failure logs, fix, and comment on issues.
+
+| Area | Tools |
+|---|---|
+| Pull requests | `pr_list`, `pr_get` (files, mergeability, CI checks, optional diff/comments), `pr_create`, `pr_comment`, `pr_update` (edit, close, reopen) |
+| Issues | `issue_list`, `issue_get`, `issue_create`, `issue_comment`, `issue_update` |
+| Actions (CI) | `actions_runs`, `actions_run_get` (failed steps listed first), `actions_job_logs` (end of the log), `actions_rerun` |
+
+- Reads follow `ALLOWED_REPOS`; anything that changes GitHub follows `WRITE_REPOS`.
+- **Not offered on purpose:** merging a pull request, approving a review, dispatching arbitrary workflows. Merging puts code on the default branch, which the server otherwise refuses to write, so it stays your decision.
+- Text sent to GitHub is scrubbed of secrets first, and text read from GitHub (issue bodies, comments, CI logs) is marked untrusted so Claude treats it as data, not instructions.
+- **Token permissions** (fine-grained PAT, only the repos you need): Contents R/W and Metadata R (file tools), Pull requests R/W, Issues R/W, Actions R/W (`actions_rerun` needs write; everything else read), Checks R (CI status in `pr_get`). Nothing else is used; leave Administration, Secrets and Workflows off.
 
 ## Blueprint
 Memory entries log each request. The **Blueprint** is the one living document per repository, updated in place, that says what the repository *is*:
