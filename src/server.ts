@@ -67,6 +67,7 @@ import { createMemoryAdmin } from './memory-admin';
 import { buildGuideTools, PROMPTS, getPrompt, GUIDE_HINT } from './guide';
 import { buildSandboxTools, SANDBOX_ANNOTATIONS, SANDBOX_HINT } from './sandbox';
 import { buildTavilyTools, TAVILY_ANNOTATIONS, TAVILY_HINT } from './tavily';
+import { buildStrixTools, STRIX_ANNOTATIONS, STRIX_HINT } from './strix';
 import { buildGithubTools, GITHUB_TOOL_ANNOTATIONS, GITHUB_HINT } from './github-tools';
 
 const http = require('http');
@@ -732,6 +733,11 @@ const SANDBOX_TOOLS = buildSandboxTools().filter((t) => !(TAVILY_TOOLS.length &&
 TOOLS.push(...SANDBOX_TOOLS);
 if (SANDBOX_TOOLS.length) console.log(`[sandbox] PandaStack tools enabled (${SANDBOX_TOOLS.length}).`);
 else console.warn('[sandbox] PANDASTACK_API_KEY not set — sandbox tools disabled.');
+// Strix Cloud pentesting (optional, STRIX_API_TOKEN). Only registered when a token is set.
+const STRIX_TOOLS = buildStrixTools();
+TOOLS.push(...STRIX_TOOLS);
+if (STRIX_TOOLS.length) console.log('[strix] pentest API enabled.');
+else console.warn('[strix] STRIX_API_TOKEN not set — pentest tools disabled.');
 
 // ---------------------------------------------------------------------------
 // HTTP helpers
@@ -1059,6 +1065,7 @@ const TOOL_ANNOTATIONS: Record<string, Record<string, boolean>> = {
   ...SANDBOX_ANNOTATIONS,
   ...GITHUB_TOOL_ANNOTATIONS,
   ...TAVILY_ANNOTATIONS,
+  ...STRIX_ANNOTATIONS,
 };
 
 async function handleMcp(req, res) {
@@ -1119,7 +1126,7 @@ async function handleMcp(req, res) {
           protocolVersion,
           capabilities: { tools: {}, prompts: {} },
           serverInfo: { name: 'lily-github-mcp-bridge', version: '2.0.0' },
-          instructions: [memoryStore ? MEMORY_INSTRUCTIONS : '', GUIDE_HINT, GITHUB_HINT, TAVILY_TOOLS.length ? TAVILY_HINT : '', SANDBOX_TOOLS.length ? SANDBOX_HINT : ''].filter(Boolean).join('\n\n'),
+          instructions: [memoryStore ? MEMORY_INSTRUCTIONS : '', GUIDE_HINT, GITHUB_HINT, TAVILY_TOOLS.length ? TAVILY_HINT : '', SANDBOX_TOOLS.length ? SANDBOX_HINT : '', STRIX_TOOLS.length ? STRIX_HINT : ''].filter(Boolean).join('\n\n'),
         },
       });
       return;
