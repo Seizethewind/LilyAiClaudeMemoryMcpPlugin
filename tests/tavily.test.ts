@@ -26,7 +26,7 @@ test('no key means no tools; env reader; annotations', () => {
   assert.deepEqual(buildTavilyTools({ apiKey: ' , ' }), []);
   assert.equal(tavilyOptionsFromEnv({ TAVILY_API_KEY: 'k1,k2' } as any).apiKey, 'k1,k2');
   const { list } = tools({ fetchImpl: fake(() => [200, OK]).fetchImpl });
-  assert.deepEqual(list.map((t) => t.name), ['web_search', 'web_extract']);
+  assert.deepEqual(list.map((t) => t.name), ['web_search', 'web_extract', 'web_map']);
   for (const t of list) assert.equal(TAVILY_ANNOTATIONS[t.name].readOnlyHint, true);
 });
 
@@ -107,4 +107,25 @@ test('a bad request or server error is reported as it is, not retried on another
     await assert.rejects(tools({ apiKey: 'tvly-aaaaaaaa1,tvly-bbbbbbbb2', fetchImpl: f.fetchImpl }).by('web_search')({ query: 'x' }), new RegExp(`Tavily ${status}`));
     assert.equal(f.calls.length, 1, String(status));
   }
+});
+
+test('map: lists URLs with sane caps, scrubs instructions, validates input', async () => {
+  const f = fake(() => [200, { base_url: 'https://docs.e.test', results: ['https://docs.e.test/a', 'https://docs.e.test/b'], usage: { credits: 1 } }]);
+  const { by, list } = tools({ fetchImpl: f.fetchImpl });
+  assert.deepEqual(list.map((t) => t.name), ['web_search', 'web_extract', 'web_map']);
+  assert.equal(TAVILY_ANNOTATIONS.web_map.readOnlyHint, true);
+  const r: any = await by('web_map')({ url: 'https://docs.e.test', max_depth: 99, max_breadth: 999, limit: 9999, instructions: 'pages about ghp_' + 'a'.repeat(36), select_paths: ['/docs/.*'] });
+  const b = f.calls[0].body;
+  assert.equal(f.calls[0].url.pathname, '/map');
+  assert.deepEqual([b.max_depth, b.max_breadth, b.limit, b.allow_external], [3, 50, 100, false]);
+  assert.ok(!b.instructions.includes('ghp_'));
+  assert.deepEqual(b.select_paths, ['/docs/.*']);
+  assert.deepEqual(r.urls, ['https://docs.e.test/a', 'https://docs.e.test/b']);
+  assert.equal(r.count, 2);
+  assert.match(r.untrusted, /data/);
+  await assert.rejects(by('web_map')({ url: 'file:///etc/passwd' }), /Only http and https/);
+  await assert.rejects(by('web_map')({ url: 'https://e.test', instructions: 'x'.repeat(301) }), /at most 300/);
+  await assert.rejects(by('web_map')({ url: 'https://e.test', select_paths: ['(unclosed'] }), /valid regular expression/);
+  await assert.rejects(by('web_map')({ url: 'https://e.test', exclude_paths: 'x' }), /at most 10/);
+  assert.equal(f.calls.length, 1);
 });
