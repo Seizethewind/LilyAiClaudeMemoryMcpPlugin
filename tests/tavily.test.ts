@@ -129,3 +129,22 @@ test('map: lists URLs with sane caps, scrubs instructions, validates input', asy
   await assert.rejects(by('web_map')({ url: 'https://e.test', exclude_paths: 'x' }), /at most 10/);
   assert.equal(f.calls.length, 1);
 });
+
+test('placeholder keys mean "no key": nothing is switched on with a fake key', async () => {
+  for (const v of ['not_set', 'not set', 'NOT_SET', 'none', 'changeme', 'xxxx', '"not_set"', ' , ']) assert.deepEqual(buildTavilyTools({ apiKey: v }), [], v);
+  assert.equal(buildTavilyTools({ apiKey: 'tvly-real1234,not_set' }).length, 3, 'a placeholder inside a list is dropped, the real key stays');
+  const { parseKeys } = await import('../src/pandastack/client');
+  assert.deepEqual(parseKeys('not_set'), []);
+  assert.deepEqual(parseKeys('pds_a, not_set ,pds_b'), ['pds_a', 'pds_b']);
+});
+
+test('usage is requested and shown, and the cost guidance is in the tool text', async () => {
+  const f = fake(() => [200, { ...OK, usage: { credits: 1 } }]);
+  const { list, by } = tools({ fetchImpl: f.fetchImpl });
+  const r: any = await by('web_search')({ query: 'x' });
+  assert.equal(f.calls[0].body.include_usage, true);
+  assert.equal(r.credits_used, 1);
+  assert.match(list[0].description, /costs credits/);
+  const { TAVILY_HINT } = await import('../src/tavily');
+  assert.match(TAVILY_HINT, /credits/);
+});

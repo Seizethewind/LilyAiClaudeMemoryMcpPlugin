@@ -83,13 +83,17 @@ export function cleanMetadata(meta: any): Record<string, string> {
 }
 
 /** "k1, k2,k3" (or an array) -> ["k1","k2","k3"]; blanks, quotes and repeats dropped, order kept. */
+const PLACEHOLDER = /^(not[ _-]?set|unset|none|null|undefined|n\/a|na|changeme|change[ _-]me|placeholder|todo|your[ _-]?key([ _-]?here)?|x{3,})$/i;
+
 export function parseKeys(raw?: string | string[]): string[] {
+  // A placeholder such as "not_set" or "not set" means "no key": it must not switch tools on with a fake key.
+  if (!Array.isArray(raw) && PLACEHOLDER.test(String(raw ?? '').trim().replace(/^["']+|["']+$/g, ''))) return [];
   const parts = Array.isArray(raw) ? raw : String(raw ?? '').split(/[\s,;]+/);
   const seen = new Set<string>();
   const out: string[] = [];
   for (const p of parts) {
     const k = String(p).trim().replace(/^["']+|["']+$/g, '');
-    if (k && !seen.has(k)) {
+    if (k && !PLACEHOLDER.test(k) && !seen.has(k)) {
       seen.add(k);
       out.push(k);
     }
