@@ -82,7 +82,7 @@ Things that make an accidental wipe recoverable:
 Upgrading from an older version is automatic: existing entries are kept; free-form project labels move to `general` (tagged `legacy-project:<old label>`), and old breakdown entries move under the repository they describe. Use `memory_rename_repo` to correct a name afterwards.
 
 ## Tavily web search
-[Tavily](https://tavily.com) is a search API built for LLMs. With a key set, Claude gets `web_search` (ranked results, a short answer, optional page text, news/finance topics, time ranges, domain filters) and `web_extract` (full text of up to 5 URLs).
+[Tavily](https://tavily.com) is a search API built for LLMs. With a key set, Claude gets `web_search` (ranked results, a short answer, optional page text, news/finance topics, time ranges, domain filters) and `web_extract` (full text of up to 5 URLs), and `web_map` (a sitemap: the URLs of a site from one address, no page text, about 1 credit per 10 pages, double when `instructions` is used). Map finds the right docs page, extract reads it.
 
 1. Create a key at tavily.com and set `TAVILY_API_KEY` on Render. Nothing is registered without it.
 2. **Several keys:** `TAVILY_API_KEY=k1,k2,k3` rotates like PandaStack (k1, k2, k3, k1, ...). A key that is rejected (401/403) rests 10 minutes; one that hit its rate limit (429) or its plan limit (432/433) is skipped for a while, and the call moves on to the next key at once. A 400 or 5xx is reported as it is, never retried on another key. Keys never appear in results or errors.
