@@ -66,6 +66,7 @@ import { openTurso } from './db';
 import { createMemoryAdmin } from './memory-admin';
 import { buildGuideTools, PROMPTS, getPrompt, GUIDE_HINT } from './guide';
 import { loadSkills, buildSkillTools, skillsHint } from './skills';
+import { buildGatewayTools, visibleTools, unwrap, toolMode, GATEWAY_ANNOTATIONS, GATEWAY_HINT } from './gateway';
 import { buildSandboxTools, SANDBOX_ANNOTATIONS, SANDBOX_HINT } from './sandbox';
 import { buildTavilyTools, TAVILY_ANNOTATIONS, TAVILY_HINT } from './tavily';
 import { buildGithubTools, GITHUB_TOOL_ANNOTATIONS, GITHUB_HINT } from './github-tools';
@@ -690,6 +691,9 @@ const TOOLS: any[] = [
 TOOLS.push(...buildGuideTools());
 const SKILLS = loadSkills();
 TOOLS.push(...buildSkillTools(SKILLS));
+const TOOL_MODE = toolMode();
+if (TOOL_MODE === 'gateway') TOOLS.push(...buildGatewayTools(() => TOOLS, () => TOOL_ANNOTATIONS));
+console.log(`[tools] mode=${TOOL_MODE}${TOOL_MODE === 'gateway' ? ' (basic tools listed, the rest via find_tools/use_tool/use_write_tool)' : ' (all tools listed)'}.`);
 
 // Pull requests, issues and Actions. Reads follow ALLOWED_REPOS, writes follow WRITE_REPOS.
 // Merging, approving and dispatching arbitrary workflows are deliberately not offered.
@@ -1063,6 +1067,7 @@ const TOOL_ANNOTATIONS: Record<string, Record<string, boolean>> = {
   ...SANDBOX_ANNOTATIONS,
   ...GITHUB_TOOL_ANNOTATIONS,
   ...TAVILY_ANNOTATIONS,
+  ...GATEWAY_ANNOTATIONS,
 };
 
 async function handleMcp(req, res) {
@@ -1123,7 +1128,7 @@ async function handleMcp(req, res) {
           protocolVersion,
           capabilities: { tools: {}, prompts: {} },
           serverInfo: { name: 'lily-github-mcp-bridge', version: '2.0.0' },
-          instructions: [memoryStore ? MEMORY_INSTRUCTIONS : '', GUIDE_HINT, skillsHint(SKILLS), GITHUB_HINT, TAVILY_TOOLS.length ? TAVILY_HINT : '', SANDBOX_TOOLS.length ? SANDBOX_HINT : ''].filter(Boolean).join('\n\n'),
+          instructions: [memoryStore ? MEMORY_INSTRUCTIONS : '', TOOL_MODE === 'gateway' ? GATEWAY_HINT : '', GUIDE_HINT, skillsHint(SKILLS), GITHUB_HINT, TAVILY_TOOLS.length ? TAVILY_HINT : '', SANDBOX_TOOLS.length ? SANDBOX_HINT : ''].filter(Boolean).join('\n\n'),
         },
       });
       return;
@@ -1134,7 +1139,7 @@ async function handleMcp(req, res) {
         jsonrpc: '2.0',
         id,
         result: {
-          tools: TOOLS.map(({ name, description, inputSchema }) => ({
+          tools: visibleTools(TOOLS, TOOL_MODE).map(({ name, description, inputSchema }) => ({
             name,
             description,
             inputSchema,
@@ -1165,17 +1170,27 @@ async function handleMcp(req, res) {
         sendJson(res, 200, { jsonrpc: '2.0', id, error: { code: -32602, message: 'Invalid params: "name" is required' } });
         return;
       }
-      const tool = TOOLS.find((t) => t.name === params.name);
+      let callName: string = params.name;
+      let args: any = params.arguments || {};
+      if (TOOL_MODE === 'gateway' && (callName === 'use_tool' || callName === 'use_write_tool')) {
+        try {
+          ({ name: callName, args } = unwrap(callName, args, TOOLS, TOOL_ANNOTATIONS));
+        } catch (err: any) {
+          console.log(`[tools/call] ${new Date().toISOString()} ip=${clientIp(req)} tool=${params.name} status=error message=${err.message}`);
+          sendJson(res, 200, { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: `Error: ${err.message}` }], isError: true } });
+          return;
+        }
+      }
+      const tool = TOOLS.find((t) => t.name === callName);
       if (!tool) {
-        sendJson(res, 200, { jsonrpc: '2.0', id, error: { code: -32601, message: `Unknown tool: ${params.name}` } });
+        sendJson(res, 200, { jsonrpc: '2.0', id, error: { code: -32601, message: `Unknown tool: ${callName}` } });
         return;
       }
-      const args = params.arguments || {};
       // Not a persisted audit log (stdout only, subject to Render's log
       // retention) but enough to answer "who touched what repo, and when" by
       // grepping deploy logs after the fact.
       const target = args.owner && args.repo ? `${args.owner}/${args.repo}` : typeof args.repo === 'string' ? args.repo.slice(0, 100) : '-';
-      const logLine = `[tools/call] ${new Date().toISOString()} ip=${clientIp(req)} tool=${params.name} repo=${target}`;
+      const logLine = `[tools/call] ${new Date().toISOString()} ip=${clientIp(req)} tool=${callName}${callName !== params.name ? ` via=${params.name}` : ''} repo=${target}`;
       try {
         const result = await tool.handler(args);
         console.log(`${logLine} status=ok`);

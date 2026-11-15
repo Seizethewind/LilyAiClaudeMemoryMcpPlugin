@@ -140,6 +140,14 @@ Guard rails (env vars, see `.env.example`):
 - OAuth requires PKCE (S256 only), and an authorization code only works for the client and redirect URI it was issued to.
 - Optional nightly backup: set `BACKUP_REPO` (a **private** repo) → memories exported as JSONL via the GitHub API.
 
+## Tool gateway (keeps the tool list small)
+By default only 12 everyday tools (file read/write, branch, `pr_create`, `pr_get`, `get_skill`, `get_breakdown_guide`, `memory_start/save/update`, `web_search`) plus three gateway tools are announced to Claude. Everything else stays available on demand:
+- `find_tools` lists the hidden tools by group (`pr`, `issue`, `actions`, `memory`, `blueprint`, `sandbox`, `web`, `repo`) or keyword, with full schemas.
+- `use_tool` runs a hidden **read-only** tool (the server refuses anything else, so its read-only hint is true).
+- `use_write_tool` runs any other hidden tool and is declared destructive, so clients can ask first.
+
+A wrapped call is unwrapped by the server and goes through the same handler, the same `ALLOWED_REPOS`/`WRITE_REPOS` checks and the same audit log line (`tool=pr_list via=use_tool`). Hidden tools can still be called directly by name. Set `TOOL_MODE=full` to list every tool as before.
+
 ## Develop
 `npm test` runs the memory tests (uses Node's built-in SQLite with FTS5 as a stand-in for libSQL).
 `npm run build` compiles `src/` to `dist/`.

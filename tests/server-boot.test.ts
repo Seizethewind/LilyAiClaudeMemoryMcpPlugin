@@ -131,18 +131,49 @@ test('OAuth with PKCE works end to end, and a refresh token cannot be used on /m
   assert.equal(renewed.status, 200);
 });
 
-test('tools/list: GitHub, PR/issue/CI and guide tools are there; optional groups are not', async () => {
+test('tools/list shows only the basic tools plus the gateway; hidden ones are reachable and still guarded', async () => {
   const t = await signIn();
   const r = await rpc(t.access_token, 'tools/list');
   const tools = r.json.result.tools as any[];
   const names = tools.map((x) => x.name);
-  for (const n of ['get_file_contents', 'create_or_update_file', 'push_files', 'create_branch', 'get_breakdown_guide', 'get_skill', 'pr_create', 'pr_get', 'issue_create', 'actions_runs', 'actions_job_logs']) assert.ok(names.includes(n), n);
-  for (const n of ['pr_merge', 'pr_approve', 'actions_dispatch']) assert.ok(!names.includes(n), `${n} must not exist`);
-  assert.ok(!names.some((n) => n.startsWith('sandbox_') || n.startsWith('memory_') || n.startsWith('blueprint_')), 'no sandbox or memory tools without their config');
+  for (const n of ['get_file_contents', 'create_branch', 'create_or_update_file', 'push_files', 'pr_create', 'pr_get', 'get_breakdown_guide', 'get_skill', 'find_tools', 'use_tool', 'use_write_tool']) assert.ok(names.includes(n), n);
+  for (const n of ['issue_create', 'actions_job_logs', 'delete_file', 'pr_list', 'pr_merge', 'pr_approve', 'actions_dispatch']) assert.ok(!names.includes(n), `${n} must not be listed`);
+  assert.ok(names.length <= 16, `${names.length} tools listed`);
   assert.equal(new Set(names).size, names.length, 'tool names are unique');
   for (const x of tools) assert.ok(x.annotations, `${x.name} has behaviour hints`);
   assert.equal(tools.find((x) => x.name === 'pr_get').annotations.readOnlyHint, true);
-  assert.equal(tools.find((x) => x.name === 'delete_file').annotations.destructiveHint, true);
+  assert.equal(tools.find((x) => x.name === 'use_tool').annotations.readOnlyHint, true);
+  assert.equal(tools.find((x) => x.name === 'use_write_tool').annotations.destructiveHint, true);
+  assert.ok(!names.some((n) => n.startsWith('sandbox_') || n.startsWith('memory_search') || n.startsWith('blueprint_')));
+
+  const call = async (name: string, args: any) => (await rpc(t.access_token, 'tools/call', { name, arguments: args })).json.result;
+  const overview = JSON.parse((await call('find_tools', {})).content[0].text);
+  assert.ok(overview.hidden_groups.issue.includes('issue_create'));
+  assert.ok(overview.hidden_groups.actions.includes('actions_job_logs'));
+  assert.ok(!JSON.stringify(overview).includes('pr_merge'));
+  const detail = JSON.parse((await call('find_tools', { group: 'issue' })).content[0].text);
+  const create = detail.tools.find((x: any) => x.name === 'issue_create');
+  assert.equal(create.call_with, 'use_write_tool');
+  assert.ok(create.inputSchema);
+  assert.equal(detail.tools.find((x: any) => x.name === 'issue_list').call_with, 'use_tool');
+
+  // use_tool refuses anything that is not read-only, and gateway tools cannot wrap themselves
+  const refused = await call('use_tool', { name: 'delete_file', arguments: { owner: 'Seizethewind', repo: 'x', path: 'a', message: 'm', branch: 'b' } });
+  assert.equal(refused.isError, true);
+  assert.match(refused.content[0].text, /use_write_tool/);
+  assert.equal((await call('use_tool', { name: 'use_write_tool', arguments: {} })).isError, true);
+  assert.equal((await call('use_tool', { name: 'nope' })).isError, true);
+  assert.equal((await call('use_tool', {})).isError, true);
+
+  // the wrapped call goes through the same allowlists as a direct call
+  const viaRead = await call('use_tool', { name: 'pr_list', arguments: { owner: 'someone-else', repo: 'repo' } });
+  assert.equal(viaRead.isError, true);
+  assert.match(viaRead.content[0].text, /not in ALLOWED_REPOS/);
+  const viaWrite = await call('use_write_tool', { name: 'delete_file', arguments: { owner: 'someone-else', repo: 'repo', path: 'a', message: 'm', branch: 'b' } });
+  assert.equal(viaWrite.isError, true);
+  assert.match(viaWrite.content[0].text, /not in ALLOWED_REPOS/);
+  // and the audit line names the real tool
+  assert.match(log, /tool=pr_list via=use_tool/);
 });
 
 test('get_skill serves a skill over the real connection', async () => {
@@ -152,9 +183,10 @@ test('get_skill serves a skill over the real connection', async () => {
   assert.match(r.content[0].text, /pr_create/);
   const init = await rpc(t.access_token, 'initialize', { protocolVersion: '2025-06-18' });
   assert.match(init.json.result.instructions, /Process skills \(/);
+  assert.match(init.json.result.instructions, /find_tools/);
 });
 
-test('repo allowlists are enforced before any GitHub call is made', async () => {
+test('repo allowlists are enforced before any GitHub call is made (direct calls by name still work)', async () => {
   const t = await signIn();
   const call = async (name: string, args: any) => (await rpc(t.access_token, 'tools/call', { name, arguments: args })).json.result;
   const read = await call('pr_list', { owner: 'someone-else', repo: 'repo' });
