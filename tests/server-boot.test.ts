@@ -136,13 +136,22 @@ test('tools/list: GitHub, PR/issue/CI and guide tools are there; optional groups
   const r = await rpc(t.access_token, 'tools/list');
   const tools = r.json.result.tools as any[];
   const names = tools.map((x) => x.name);
-  for (const n of ['get_file_contents', 'create_or_update_file', 'push_files', 'create_branch', 'get_breakdown_guide', 'pr_create', 'pr_get', 'issue_create', 'actions_runs', 'actions_job_logs']) assert.ok(names.includes(n), n);
+  for (const n of ['get_file_contents', 'create_or_update_file', 'push_files', 'create_branch', 'get_breakdown_guide', 'get_skill', 'pr_create', 'pr_get', 'issue_create', 'actions_runs', 'actions_job_logs']) assert.ok(names.includes(n), n);
   for (const n of ['pr_merge', 'pr_approve', 'actions_dispatch']) assert.ok(!names.includes(n), `${n} must not exist`);
   assert.ok(!names.some((n) => n.startsWith('sandbox_') || n.startsWith('memory_') || n.startsWith('blueprint_')), 'no sandbox or memory tools without their config');
   assert.equal(new Set(names).size, names.length, 'tool names are unique');
   for (const x of tools) assert.ok(x.annotations, `${x.name} has behaviour hints`);
   assert.equal(tools.find((x) => x.name === 'pr_get').annotations.readOnlyHint, true);
   assert.equal(tools.find((x) => x.name === 'delete_file').annotations.destructiveHint, true);
+});
+
+test('get_skill serves a skill over the real connection', async () => {
+  const t = await signIn();
+  const r = (await rpc(t.access_token, 'tools/call', { name: 'get_skill', arguments: { name: 'ship-a-change' } })).json.result;
+  assert.ok(!r.isError);
+  assert.match(r.content[0].text, /pr_create/);
+  const init = await rpc(t.access_token, 'initialize', { protocolVersion: '2025-06-18' });
+  assert.match(init.json.result.instructions, /Process skills \(/);
 });
 
 test('repo allowlists are enforced before any GitHub call is made', async () => {

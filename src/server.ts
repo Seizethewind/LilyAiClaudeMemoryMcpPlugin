@@ -65,6 +65,7 @@ import { MemoryStore, buildMemoryTools, MEMORY_INSTRUCTIONS } from './memory';
 import { openTurso } from './db';
 import { createMemoryAdmin } from './memory-admin';
 import { buildGuideTools, PROMPTS, getPrompt, GUIDE_HINT } from './guide';
+import { loadSkills, buildSkillTools, skillsHint } from './skills';
 import { buildSandboxTools, SANDBOX_ANNOTATIONS, SANDBOX_HINT } from './sandbox';
 import { buildTavilyTools, TAVILY_ANNOTATIONS, TAVILY_HINT } from './tavily';
 import { buildGithubTools, GITHUB_TOOL_ANNOTATIONS, GITHUB_HINT } from './github-tools';
@@ -687,6 +688,8 @@ const TOOLS: any[] = [
 
 // On-demand repo breakdown playbook (no analysis runs here; Claude does it).
 TOOLS.push(...buildGuideTools());
+const SKILLS = loadSkills();
+TOOLS.push(...buildSkillTools(SKILLS));
 
 // Pull requests, issues and Actions. Reads follow ALLOWED_REPOS, writes follow WRITE_REPOS.
 // Merging, approving and dispatching arbitrary workflows are deliberately not offered.
@@ -1040,6 +1043,7 @@ const TOOL_ANNOTATIONS: Record<string, Record<string, boolean>> = {
   push_files: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
   delete_file: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
   get_breakdown_guide: { readOnlyHint: true, openWorldHint: false },
+  get_skill: { readOnlyHint: true, openWorldHint: false },
   memory_start: { readOnlyHint: true, openWorldHint: false },
   memory_repos: { readOnlyHint: true, openWorldHint: false },
   memory_search: { readOnlyHint: true, openWorldHint: false },
@@ -1119,7 +1123,7 @@ async function handleMcp(req, res) {
           protocolVersion,
           capabilities: { tools: {}, prompts: {} },
           serverInfo: { name: 'lily-github-mcp-bridge', version: '2.0.0' },
-          instructions: [memoryStore ? MEMORY_INSTRUCTIONS : '', GUIDE_HINT, GITHUB_HINT, TAVILY_TOOLS.length ? TAVILY_HINT : '', SANDBOX_TOOLS.length ? SANDBOX_HINT : ''].filter(Boolean).join('\n\n'),
+          instructions: [memoryStore ? MEMORY_INSTRUCTIONS : '', GUIDE_HINT, skillsHint(SKILLS), GITHUB_HINT, TAVILY_TOOLS.length ? TAVILY_HINT : '', SANDBOX_TOOLS.length ? SANDBOX_HINT : ''].filter(Boolean).join('\n\n'),
         },
       });
       return;

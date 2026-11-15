@@ -18,3 +18,7 @@ Process skills for this MCP server. Each one is named after a job, lists the too
 | memory-housekeeping | tidy memory, on request only |
 
 Rules (enforced by `tests/skills.test.ts`): frontmatter is only `name` and `description`; a `## Tools` line lists real tools; two skills differ by at least 2 tools unless one is a strict superset (the advanced version).
+
+## Using them
+- **Any session with the connector:** the server serves these files through `get_skill` (no name lists them; a name returns the full skill). Only the skill names sit in the always-on instructions.
+- Folders are the single source of truth: change a `SKILL.md`, redeploy, and `get_skill` serves the new text.
