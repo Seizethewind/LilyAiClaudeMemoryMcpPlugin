@@ -67,6 +67,8 @@ import { createMemoryAdmin } from './memory-admin';
 import { buildGuideTools, PROMPTS, getPrompt, GUIDE_HINT } from './guide';
 import { loadSkills, buildSkillTools, skillsHint } from './skills';
 import { buildGatewayTools, visibleTools, unwrap, toolMode, GATEWAY_ANNOTATIONS, GATEWAY_HINT } from './gateway';
+import { safeEqual, base64url, signJwt, verifyJwt } from './jwt';
+import { clientIp, makeRateLimiter, sendJson, readBody, getBearerToken, escapeHtml, PayloadTooLargeError, MAX_BODY_BYTES } from './http-util';
 import { buildSandboxTools, SANDBOX_ANNOTATIONS, SANDBOX_HINT } from './sandbox';
 import { buildTavilyTools, TAVILY_ANNOTATIONS, TAVILY_HINT } from './tavily';
 import { buildGithubTools, GITHUB_TOOL_ANNOTATIONS, GITHUB_HINT } from './github-tools';
@@ -166,67 +168,6 @@ try {
 // Small crypto helpers
 // ---------------------------------------------------------------------------
 
-// Constant-time string comparison. Both sides are hashed first so the inputs
-// are always the same length (timingSafeEqual throws on length mismatch and
-// an early length check would leak the secret's length).
-function safeEqual(a, b) {
-  const ha = crypto.createHash('sha256').update(String(a)).digest();
-  const hb = crypto.createHash('sha256').update(String(b)).digest();
-  return crypto.timingSafeEqual(ha, hb);
-}
-
-// ---------------------------------------------------------------------------
-// Tiny JWT (HS256) implementation, no external deps
-// ---------------------------------------------------------------------------
-
-function base64url(input) {
-  return Buffer.from(input)
-    .toString('base64')
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_')
-    .replace(/=+$/, '');
-}
-
-function signJwt(payload, secret, expiresInSeconds) {
-  const header = { alg: 'HS256', typ: 'JWT' };
-  const now = Math.floor(Date.now() / 1000);
-  const fullPayload = { ...payload, iat: now, exp: now + expiresInSeconds };
-  const headerB64 = base64url(JSON.stringify(header));
-  const payloadB64 = base64url(JSON.stringify(fullPayload));
-  const signature = crypto
-    .createHmac('sha256', secret)
-    .update(`${headerB64}.${payloadB64}`)
-    .digest('base64')
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_')
-    .replace(/=+$/, '');
-  return `${headerB64}.${payloadB64}.${signature}`;
-}
-
-// Returns the payload for a valid, unexpired token, or null for anything
-// else (malformed, bad signature, expired). Never throws.
-function verifyJwt(token, secret) {
-  try {
-    const parts = String(token).split('.');
-    if (parts.length !== 3) return null;
-    const [headerB64, payloadB64, signature] = parts;
-    const expected = crypto
-      .createHmac('sha256', secret)
-      .update(`${headerB64}.${payloadB64}`)
-      .digest('base64')
-      .replace(/\+/g, '-')
-      .replace(/\//g, '_')
-      .replace(/=+$/, '');
-    if (!safeEqual(signature, expected)) return null;
-    const payload = JSON.parse(Buffer.from(payloadB64, 'base64').toString('utf8'));
-    if (!payload || typeof payload !== 'object') return null;
-    if (!payload.exp || Math.floor(Date.now() / 1000) > payload.exp) return null;
-    return payload;
-  } catch (e) {
-    return null;
-  }
-}
-
 function issueTokens() {
   return {
     access_token: signJwt({ sub: 'lily-mcp-user', typ: 'access' }, JWT_SECRET, ACCESS_TOKEN_TTL_S),
@@ -315,54 +256,6 @@ function isAcceptableRedirectUri(uri) {
 // single-instance bridge with no external store — it bounds abuse within a
 // running process without adding a database dependency.
 // ---------------------------------------------------------------------------
-
-function clientIp(req) {
-  // Behind a reverse proxy the rightmost X-Forwarded-For entry is the one the
-  // proxy itself appended; earlier entries can be forged by the client.
-  const xff = String(req.headers['x-forwarded-for'] || '')
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean);
-  return xff.length ? xff[xff.length - 1] : (req.socket && req.socket.remoteAddress) || 'unknown';
-}
-
-function makeRateLimiter({ windowMs, maxPerIp, maxGlobal }) {
-  const perIp = new Map(); // ip -> [timestamps]
-  let global: number[] = [];
-
-  function recent(list) {
-    const cutoff = Date.now() - windowMs;
-    return list.filter((t) => t > cutoff);
-  }
-
-  // Periodically drop stale entries so the map can't grow without bound.
-  setInterval(() => {
-    for (const [ip, list] of perIp) {
-      const r = recent(list);
-      if (r.length) perIp.set(ip, r);
-      else perIp.delete(ip);
-    }
-  }, windowMs).unref();
-
-  return {
-    lockedOut(ip) {
-      global = recent(global);
-      const mine = recent(perIp.get(ip) || []);
-      if (mine.length) perIp.set(ip, mine);
-      else perIp.delete(ip);
-      return mine.length >= maxPerIp || global.length >= maxGlobal;
-    },
-    recordFailure(ip) {
-      const now = Date.now();
-      perIp.set(ip, [...recent(perIp.get(ip) || []), now]);
-      global.push(now);
-    },
-    clear(ip) {
-      perIp.delete(ip);
-    },
-    windowMs,
-  };
-}
 
 // /authorize: keyed on wrong-secret attempts (existing behavior).
 const authorizeLimiter = makeRateLimiter({ windowMs: 15 * 60 * 1000, maxPerIp: 5, maxGlobal: 20 });
@@ -744,49 +637,6 @@ else console.warn('[sandbox] PANDASTACK_API_KEY not set — sandbox tools disabl
 // HTTP helpers
 // ---------------------------------------------------------------------------
 
-function sendJson(res, status, obj, extraHeaders?) {
-  const body = JSON.stringify(obj);
-  res.writeHead(status, {
-    'Content-Type': 'application/json',
-    'Content-Length': Buffer.byteLength(body),
-    ...(extraHeaders || {}),
-  });
-  res.end(body);
-}
-
-// Applies to every POST body this server reads, including the unauthenticated
-// /register, /authorize, and /token endpoints, so a flood of oversized
-// requests can't grow memory unbounded. None of our real payloads (OAuth
-// form posts, MCP tool calls, file contents for push_files) need anywhere
-// near this much; it's a generous ceiling, not a working limit.
-const MAX_BODY_BYTES = 2 * 1024 * 1024; // 2 MB
-
-class PayloadTooLargeError extends Error {}
-
-function readBody(req) {
-  return new Promise<string>((resolve, reject) => {
-    let size = 0;
-    const chunks: Buffer[] = [];
-    req.on('data', (chunk) => {
-      size += chunk.length;
-      if (size > MAX_BODY_BYTES) {
-        req.destroy();
-        reject(new PayloadTooLargeError('Request body too large'));
-        return;
-      }
-      chunks.push(chunk);
-    });
-    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
-    req.on('error', reject);
-  });
-}
-
-function getBearerToken(req) {
-  const auth = req.headers['authorization'] || '';
-  const match = auth.match(/^Bearer\s+(.+)$/i);
-  return match ? match[1] : null;
-}
-
 // ---------------------------------------------------------------------------
 // OAuth 2.0 endpoints (authorization code flow, gated by MCP_ADMIN_SECRET)
 // ---------------------------------------------------------------------------
@@ -911,10 +761,6 @@ button{padding:10px 16px;cursor:pointer}
     'Referrer-Policy': 'no-referrer',
   });
   res.end(html);
-}
-
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, (c: string) => (({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' } as Record<string, string>)[c]));
 }
 
 async function handleAuthorizePost(req, res) {
