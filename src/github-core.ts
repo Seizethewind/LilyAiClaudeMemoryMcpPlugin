@@ -43,7 +43,7 @@ export function createGithubCore(cfg: { token: string | undefined; allowedRepos:
             } catch (e) {
               parsed = raw;
             }
-            resolve({ status: res.statusCode, body: parsed, headers: res.headers });
+            resolve({ status: res.statusCode as number, body: parsed, headers: res.headers });
           });
         }
       );
