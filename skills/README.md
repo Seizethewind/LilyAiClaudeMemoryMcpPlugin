@@ -22,3 +22,4 @@ Rules (enforced by `tests/skills.test.ts`): frontmatter is only `name` and `desc
 ## Using them
 - **Any session with the connector:** the server serves these files through `get_skill` (no name lists them; a name returns the full skill). Only the skill names sit in the always-on instructions.
 - Folders are the single source of truth: change a `SKILL.md`, redeploy, and `get_skill` serves the new text.
+- Tools named in a skill may be hidden by the tool gateway. Reach them with `find_tools`, then `use_tool` (read-only) or `use_write_tool`.
