@@ -148,6 +148,10 @@ By default only 12 everyday tools (file read/write, branch, `pr_create`, `pr_get
 
 A wrapped call is unwrapped by the server and goes through the same handler, the same `ALLOWED_REPOS`/`WRITE_REPOS` checks and the same audit log line (`tool=pr_list via=use_tool`). Hidden tools can still be called directly by name. Set `TOOL_MODE=full` to list every tool as before.
 
+## Call limits and audit log
+- **Rate limits** on `/mcp` tool calls, per client IP, per minute (in memory, reset on restart): `MCP_RATE_LIMIT_PER_MIN` for all calls (default 120) and a tighter `MCP_WRITE_LIMIT_PER_MIN` for calls that change something (default 30). `0` turns a limit off. Over the limit the call is refused with a plain tool error before any handler or GitHub request runs; reads keep working while writes are limited.
+- **Audit log** for GitHub writes (commit, delete, branch, PR, issue, comment, rerun): one `[audit] {...}` JSON line per attempt in the server log with time, IP, tool, repo, branch/path, file count and result. It never contains file contents, commit messages or comment bodies, and errors are redacted. It lasts as long as Render keeps the logs.
+
 ## Develop
 `npm test` runs the memory tests (uses Node's built-in SQLite with FTS5 as a stand-in for libSQL).
 `npm run build` compiles `src/` to `dist/`.

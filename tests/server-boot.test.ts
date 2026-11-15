@@ -29,9 +29,9 @@ function freePort(): Promise<number> {
   });
 }
 
-before(async () => {
+async function boot(extraEnv: Record<string, string> = {}) {
   const port = await freePort();
-  base = `http://127.0.0.1:${port}`;
+  const url = `http://127.0.0.1:${port}`;
   // A clean environment: nothing real can leak in, and nothing optional is configured.
   const env: Record<string, string> = {
     PATH: process.env.PATH || '',
@@ -39,22 +39,35 @@ before(async () => {
     GITHUB_TOKEN: 'dummy-token-never-used',
     MCP_ADMIN_SECRET: ADMIN,
     MCP_JWT_SECRET: 'jwt-secret-for-the-boot-test-only-123',
-    MCP_BASE_URL: base,
+    MCP_BASE_URL: url,
     ALLOWED_REPOS: 'Seizethewind/*',
     PORT: String(port),
     SELF_PING: 'false',
     TAVILY_API_KEY: 'not_set',
     PANDASTACK_API_KEY: 'not_set',
+    ...extraEnv,
   };
-  child = spawn(process.execPath, [...process.execArgv, join(__dirname, '..', 'src', 'server.ts')], { env, cwd: join(__dirname, '..') });
-  child.stdout!.on('data', (d) => (log += d));
-  child.stderr!.on('data', (d) => (log += d));
+  const proc = spawn(process.execPath, [...process.execArgv, join(__dirname, '..', 'src', 'server.ts')], { env, cwd: join(__dirname, '..') });
+  const out = { log: '' };
+  proc.stdout!.on('data', (d) => (out.log += d));
+  proc.stderr!.on('data', (d) => (out.log += d));
   const deadline = Date.now() + 20_000;
-  while (!/listening on/.test(log)) {
-    if (child.exitCode !== null) throw new Error(`server exited early (${child.exitCode}):\n${log}`);
-    if (Date.now() > deadline) throw new Error(`server did not start in time:\n${log}`);
+  while (!/listening on/.test(out.log)) {
+    if (proc.exitCode !== null) throw new Error(`server exited early (${proc.exitCode}):\n${out.log}`);
+    if (Date.now() > deadline) throw new Error(`server did not start in time:\n${out.log}`);
     await new Promise((r) => setTimeout(r, 100));
   }
+  return { proc, url, out };
+}
+
+before(async () => {
+  const s = await boot();
+  child = s.proc;
+  base = s.url;
+  // `log` follows the main server's output live
+  log = s.out.log;
+  s.proc.stdout!.on('data', (d) => (log += d));
+  s.proc.stderr!.on('data', (d) => (log += d));
 });
 
 after(() => {
@@ -63,8 +76,8 @@ after(() => {
 
 const b64url = (b: Buffer) => b.toString('base64url');
 
-async function rpc(token: string | null, method: string, params?: any) {
-  const res = await fetch(`${base}/mcp`, {
+async function rpc(token: string | null, method: string, params?: any, at: string = base) {
+  const res = await fetch(`${at}/mcp`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
     body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
@@ -73,7 +86,8 @@ async function rpc(token: string | null, method: string, params?: any) {
 }
 
 /** Full OAuth authorization-code + PKCE flow, returning both tokens. */
-async function signIn() {
+async function signIn(base0: string = base) {
+  const base = base0;
   const reg = await fetch(`${base}/register`, { method: 'POST', body: JSON.stringify({ redirect_uris: [REDIRECT] }) });
   assert.equal(reg.status, 201);
   const clientId = ((await reg.json()) as any).client_id;
@@ -208,4 +222,33 @@ test('the admin page does not hand anything to an anonymous visitor', async () =
   assert.notEqual(post.status, 200, 'an anonymous action must not succeed');
   const unknown = await fetch(`${base}/does-not-exist`);
   assert.equal(unknown.status, 404);
+});
+
+test('rate limits and the audit log work on a real server', async () => {
+  const s = await boot({ MCP_WRITE_LIMIT_PER_MIN: '2', MCP_RATE_LIMIT_PER_MIN: '50' });
+  try {
+    const t = await signIn(s.url);
+    const call = async (name: string, args: any) => (await rpc(t.access_token, 'tools/call', { name, arguments: args }, s.url)).json.result;
+    const del = { name: 'delete_file', arguments: { owner: 'Seizethewind', repo: 'x', path: 'a', message: 'SECRET MESSAGE', branch: 'b' } };
+    // two changing calls are allowed through (GitHub is never reached with a dummy token and the fake path; they fail or succeed, but they are audited)
+    await call('use_write_tool', del);
+    await call('use_write_tool', del);
+    const third = await call('use_write_tool', del);
+    assert.equal(third.isError, true);
+    assert.match(third.content[0].text, /Write limit reached \(2 changing calls per minute\)/);
+    // reads are not affected by the write limit
+    const read = await call('find_tools', {});
+    assert.ok(!read.isError);
+    // the audit log has the two real attempts, names only, and nothing for the refused one
+    const audits = s.out.log.split('\n').filter((l) => l.startsWith('[audit] '));
+    assert.equal(audits.length, 2, audits.join('\n'));
+    const rec = JSON.parse(audits[0].slice(8));
+    assert.equal(rec.tool, 'delete_file');
+    assert.equal(rec.via, 'use_write_tool');
+    assert.equal(rec.repo, 'Seizethewind/x');
+    assert.ok(!s.out.log.includes('SECRET MESSAGE'), 'commit messages are not logged');
+    assert.match(s.out.log, /status=rate_limited/);
+  } finally {
+    s.proc.kill();
+  }
 });

@@ -71,6 +71,7 @@ import { safeEqual, base64url, signJwt, verifyJwt } from './jwt';
 import { clientIp, makeRateLimiter, sendJson, readBody, getBearerToken, escapeHtml, PayloadTooLargeError, MAX_BODY_BYTES } from './http-util';
 import { createOAuth } from './oauth';
 import { createGithubCore } from './github-core';
+import { callGuardFromEnv, auditLine } from './guard';
 import { buildCoreTools } from './core-tools';
 import { buildSandboxTools, SANDBOX_ANNOTATIONS, SANDBOX_HINT } from './sandbox';
 import { buildTavilyTools, TAVILY_ANNOTATIONS, TAVILY_HINT } from './tavily';
@@ -189,6 +190,8 @@ const githubCore = createGithubCore({
 const { githubRequest, assertRepoAllowed, assertWriteAllowed, encodePath, downloadTail } = githubCore;
 
 const TOOLS: any[] = buildCoreTools(githubCore);
+const CORE_TOOL_NAMES = new Set(TOOLS.map((t) => t.name));
+const callGuard = callGuardFromEnv();
 
 // On-demand repo breakdown playbook (no analysis runs here; Claude does it).
 TOOLS.push(...buildGuideTools());
@@ -386,6 +389,16 @@ async function handleMcp(req, res) {
         sendJson(res, 200, { jsonrpc: '2.0', id, error: { code: -32601, message: `Unknown tool: ${callName}` } });
         return;
       }
+      const writes = TOOL_ANNOTATIONS[callName]?.readOnlyHint !== true;
+      const refused = callGuard.check(clientIp(req), writes);
+      if (refused) {
+        console.log(`[tools/call] ${new Date().toISOString()} ip=${clientIp(req)} tool=${callName} status=rate_limited`);
+        sendJson(res, 200, { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: `Error: ${refused}` }], isError: true } });
+        return;
+      }
+      // GitHub writes get a structured [audit] line as well (names and counts, never contents).
+      const auditWrite = writes && (CORE_TOOL_NAMES.has(callName) || GITHUB_TOOLS.some((t) => t.name === callName));
+      const via = callName !== params.name ? params.name : undefined;
       // Not a persisted audit log (stdout only, subject to Render's log
       // retention) but enough to answer "who touched what repo, and when" by
       // grepping deploy logs after the fact.
@@ -394,6 +407,7 @@ async function handleMcp(req, res) {
       try {
         const result = await tool.handler(args);
         console.log(`${logLine} status=ok`);
+        if (auditWrite) console.log(auditLine({ ip: clientIp(req), tool: callName, via, args, ok: true }));
         sendJson(res, 200, {
           jsonrpc: '2.0',
           id,
@@ -401,6 +415,7 @@ async function handleMcp(req, res) {
         });
       } catch (err) {
         console.log(`${logLine} status=error message=${err.message}`);
+        if (auditWrite) console.log(auditLine({ ip: clientIp(req), tool: callName, via, args, ok: false, error: err.message }));
         sendJson(res, 200, {
           jsonrpc: '2.0',
           id,
