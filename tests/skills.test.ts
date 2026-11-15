@@ -23,8 +23,8 @@ const skills: Skill[] = readdirSync(DIR, { withFileTypes: true })
     return { dir: e.name, name: fm![1], description: fm![2], tools: new Set([...section![1].matchAll(/`([a-z_]+)`/g)].map((m) => m[1])) };
   });
 
-test('between 10 and 10 skills, one folder each', () => {
-  assert.ok(skills.length >= 10 && skills.length <= 10, `have ${skills.length}`);
+test('between 10 and 12 skills, one folder each', () => {
+  assert.ok(skills.length >= 10 && skills.length <= 12, `have ${skills.length}`);
 });
 
 test('names match folders, are unique and descriptions say when to use them', () => {

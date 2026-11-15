@@ -14,5 +14,7 @@ Process skills for this MCP server. Each one is named after a job, lists the too
 | review-pull-request | review comments + verdict |
 | triage-issues | ranked open issues |
 | research-cheaply | cited answer, minimal credits |
+| preview-and-screenshot | screenshot of a running page |
+| memory-housekeeping | tidy memory, on request only |
 
 Rules (enforced by `tests/skills.test.ts`): frontmatter is only `name` and `description`; a `## Tools` line lists real tools; two skills differ by at least 2 tools unless one is a strict superset (the advanced version).
