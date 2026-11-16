@@ -38,11 +38,12 @@ export function callGuardFromEnv(env: NodeJS.ProcessEnv = process.env): CallGuar
 const cut = (v: unknown, n: number) => String(v).slice(0, n);
 
 /** One structured line describing a GitHub write. Never includes contents, messages or comment bodies. */
-export function auditLine(e: { ip: string; tool: string; via?: string; args: any; ok: boolean; error?: string; now?: Date }): string {
+export function auditLine(e: { ip: string; client?: string; tool: string; via?: string; args: any; ok: boolean; error?: string; now?: Date }): string {
   const a = e.args || {};
   const rec: Record<string, unknown> = {
     ts: (e.now || new Date()).toISOString(),
     ip: e.ip,
+    ...(e.client ? { client: e.client } : {}),
     tool: e.tool,
     ...(e.via ? { via: e.via } : {}),
     repo: a.owner && a.repo ? `${a.owner}/${a.repo}` : '-',

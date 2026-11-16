@@ -72,6 +72,7 @@ import { clientIp, makeRateLimiter, sendJson, readBody, getBearerToken, escapeHt
 import { createOAuth } from './oauth';
 import { createGithubCore } from './github-core';
 import { callGuardFromEnv, auditLine } from './guard';
+import { parseApiKeys, authenticateApiKey } from './apikeys';
 import { buildCoreTools } from './core-tools';
 import { buildSandboxTools, SANDBOX_ANNOTATIONS, SANDBOX_HINT } from './sandbox';
 import { buildTavilyTools, TAVILY_ANNOTATIONS, TAVILY_HINT } from './tavily';
@@ -192,6 +193,9 @@ const { githubRequest, assertRepoAllowed, assertWriteAllowed, encodePath, downlo
 const TOOLS: any[] = buildCoreTools(githubCore);
 const CORE_TOOL_NAMES = new Set(TOOLS.map((t) => t.name));
 const callGuard = callGuardFromEnv();
+const { keys: API_KEYS, warnings: API_KEY_WARNINGS } = parseApiKeys(process.env.MCP_API_KEYS);
+for (const w of API_KEY_WARNINGS) console.warn(`[api-keys] ${w}`);
+if (API_KEYS.length) console.log(`[api-keys] ${API_KEYS.length} access key(s) enabled: ${API_KEYS.map((k) => `${k.label} (${k.scope})`).join(', ')}.`);
 
 // On-demand repo breakdown playbook (no analysis runs here; Claude does it).
 TOOLS.push(...buildGuideTools());
@@ -275,10 +279,12 @@ const TOOL_ANNOTATIONS: Record<string, Record<string, boolean>> = {
 
 async function handleMcp(req, res) {
   const token = getBearerToken(req);
-  const claims = token ? verifyJwt(token, JWT_SECRET) : null;
+  // A static access key (MCP_API_KEYS) is an alternative to the OAuth access token, for clients that cannot browse.
+  const apiKey = token ? authenticateApiKey(token, API_KEYS) : null;
+  const claims = token && !apiKey ? verifyJwt(token, JWT_SECRET) : null;
   // Only access tokens may call /mcp: refresh tokens and the admin page's
   // session cookie are signed with the same secret and must never work here.
-  if (!claims || claims.typ !== 'access') {
+  if (!apiKey && (!claims || claims.typ !== 'access')) {
     // Point the client at our protected-resource metadata so it knows
     // where to go to authenticate (required for MCP OAuth discovery).
     res.writeHead(401, {
@@ -289,6 +295,9 @@ async function handleMcp(req, res) {
     return;
   }
 
+  // Who is calling, for rate limits and logs: a key client by label, everyone else by IP.
+  const who = apiKey ? `key:${apiKey.label}` : clientIp(req);
+  const clientTag = apiKey ? ` client=${apiKey.label}` : '';
   let payload;
   try {
     payload = JSON.parse(await readBody(req));
@@ -379,7 +388,7 @@ async function handleMcp(req, res) {
         try {
           ({ name: callName, args } = unwrap(callName, args, TOOLS, TOOL_ANNOTATIONS));
         } catch (err: any) {
-          console.log(`[tools/call] ${new Date().toISOString()} ip=${clientIp(req)} tool=${params.name} status=error message=${err.message}`);
+          console.log(`[tools/call] ${new Date().toISOString()} ip=${clientIp(req)}${clientTag} tool=${params.name} status=error message=${err.message}`);
           sendJson(res, 200, { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: `Error: ${err.message}` }], isError: true } });
           return;
         }
@@ -390,9 +399,14 @@ async function handleMcp(req, res) {
         return;
       }
       const writes = TOOL_ANNOTATIONS[callName]?.readOnlyHint !== true;
-      const refused = callGuard.check(clientIp(req), writes);
+      if (apiKey && apiKey.scope === 'read' && writes) {
+        console.log(`[tools/call] ${new Date().toISOString()} ip=${clientIp(req)}${clientTag} tool=${callName} status=forbidden`);
+        sendJson(res, 200, { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: `Error: this access key is read-only, so ${callName} is not allowed. Use a full key for tools that change something.` }], isError: true } });
+        return;
+      }
+      const refused = callGuard.check(who, writes);
       if (refused) {
-        console.log(`[tools/call] ${new Date().toISOString()} ip=${clientIp(req)} tool=${callName} status=rate_limited`);
+        console.log(`[tools/call] ${new Date().toISOString()} ip=${clientIp(req)}${clientTag} tool=${callName} status=rate_limited`);
         sendJson(res, 200, { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: `Error: ${refused}` }], isError: true } });
         return;
       }
@@ -403,11 +417,11 @@ async function handleMcp(req, res) {
       // retention) but enough to answer "who touched what repo, and when" by
       // grepping deploy logs after the fact.
       const target = args.owner && args.repo ? `${args.owner}/${args.repo}` : typeof args.repo === 'string' ? args.repo.slice(0, 100) : '-';
-      const logLine = `[tools/call] ${new Date().toISOString()} ip=${clientIp(req)} tool=${callName}${callName !== params.name ? ` via=${params.name}` : ''} repo=${target}`;
+      const logLine = `[tools/call] ${new Date().toISOString()} ip=${clientIp(req)}${clientTag} tool=${callName}${callName !== params.name ? ` via=${params.name}` : ''} repo=${target}`;
       try {
         const result = await tool.handler(args);
         console.log(`${logLine} status=ok`);
-        if (auditWrite) console.log(auditLine({ ip: clientIp(req), tool: callName, via, args, ok: true }));
+        if (auditWrite) console.log(auditLine({ ip: clientIp(req), client: apiKey?.label, tool: callName, via, args, ok: true }));
         sendJson(res, 200, {
           jsonrpc: '2.0',
           id,
@@ -415,7 +429,7 @@ async function handleMcp(req, res) {
         });
       } catch (err) {
         console.log(`${logLine} status=error message=${err.message}`);
-        if (auditWrite) console.log(auditLine({ ip: clientIp(req), tool: callName, via, args, ok: false, error: err.message }));
+        if (auditWrite) console.log(auditLine({ ip: clientIp(req), client: apiKey?.label, tool: callName, via, args, ok: false, error: err.message }));
         sendJson(res, 200, {
           jsonrpc: '2.0',
           id,

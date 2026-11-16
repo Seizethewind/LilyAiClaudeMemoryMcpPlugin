@@ -252,3 +252,50 @@ test('rate limits and the audit log work on a real server', async () => {
     s.proc.kill();
   }
 });
+
+test('static access keys: work without OAuth, read keys cannot change anything, wrong keys are refused, secrets stay out of the log', async () => {
+  const FULL = 'f'.repeat(16) + 'u'.repeat(16) + 'l1';
+  const READ = 'r'.repeat(16) + 'e'.repeat(16) + 'ad';
+  const s = await boot({ MCP_API_KEYS: `terminal=${FULL}, viewer:read=${READ}, short=abc` });
+  try {
+    assert.match(s.out.log, /\[api-keys\] 2 access key\(s\) enabled: terminal \(full\), viewer \(read\)/);
+    assert.match(s.out.log, /key "short" is shorter than 32 characters/);
+    const call = async (token: string, name: string, args: any) => (await rpc(token, 'tools/call', { name, arguments: args }, s.url)).json.result;
+
+    // no browser, no OAuth: the key alone opens /mcp
+    const init = await rpc(FULL, 'initialize', { protocolVersion: '2025-06-18' }, s.url);
+    assert.equal(init.status, 200);
+    assert.ok((await rpc(FULL, 'tools/list', {}, s.url)).json.result.tools.length > 5);
+
+    // wrong, truncated and empty keys are refused like any bad token
+    for (const bad of [FULL + 'x', FULL.slice(1), 'short', 'not.a.token']) {
+      const r = await rpc(bad, 'tools/list', {}, s.url);
+      assert.equal(r.status, 401);
+      assert.match(r.headers.get('www-authenticate') || '', /resource_metadata=/);
+    }
+
+    // a read key runs read-only tools but is refused for anything that changes something, directly or through the gateway
+    assert.ok(!(await call(READ, 'find_tools', {})).isError);
+    const viaGateway = await call(READ, 'use_write_tool', { name: 'delete_file', arguments: { owner: 'Seizethewind', repo: 'x', path: 'a', message: 'm', branch: 'b' } });
+    assert.equal(viaGateway.isError, true);
+    assert.match(viaGateway.content[0].text, /read-only/);
+    const direct = await call(READ, 'create_or_update_file', { owner: 'Seizethewind', repo: 'x', path: 'a', content: 'x', message: 'm', branch: 'b' });
+    assert.match(direct.content[0].text, /read-only/);
+
+    // a full key gets past the scope check (it then stops at the repo allowlist), and the audit line names the key
+    const full = await call(FULL, 'use_write_tool', { name: 'delete_file', arguments: { owner: 'someone-else', repo: 'x', path: 'a', message: 'm', branch: 'b' } });
+    assert.match(full.content[0].text, /not in ALLOWED_REPOS/);
+    const audit = s.out.log.split('\n').filter((l) => l.startsWith('[audit] ')).map((l) => JSON.parse(l.slice(8)));
+    assert.equal(audit.length, 1);
+    assert.equal(audit[0].client, 'terminal');
+    assert.match(s.out.log, /status=forbidden/);
+
+    // OAuth sign-in still works next to the keys, and a key is not an OAuth token
+    const t = await signIn(s.url);
+    assert.equal((await rpc(t.access_token, 'tools/list', {}, s.url)).status, 200);
+
+    assert.ok(!s.out.log.includes(FULL) && !s.out.log.includes(READ), 'secrets are never logged');
+  } finally {
+    s.proc.kill();
+  }
+});
