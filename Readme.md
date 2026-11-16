@@ -148,6 +148,18 @@ By default only 12 everyday tools (file read/write, branch, `pr_create`, `pr_get
 
 A wrapped call is unwrapped by the server and goes through the same handler, the same `ALLOWED_REPOS`/`WRITE_REPOS` checks and the same audit log line (`tool=pr_list via=use_tool`). Hidden tools can still be called directly by name. Set `TOOL_MODE=full` to list every tool as before.
 
+## Access keys for terminal tools (no browser needed)
+Clients that cannot do the browser sign-in (a terminal AI over SSH, a script, your own app) can use a static key instead. Set `MCP_API_KEYS` on the server and send the secret as a bearer token:
+
+```
+MCP_API_KEYS=terminal=<secret>,viewer:read=<another secret>
+```
+- Format `label=secret`, or `label:read=secret` for a **read-only** key (it can run tools that change nothing; anything else is refused). The default scope is `full`.
+- Secrets must be at least 32 characters. Make one with `openssl rand -hex 32` (or `python3 -c "import secrets; print(secrets.token_urlsafe(32))"`). Shorter ones and placeholders such as `not_set` are ignored.
+- The client calls `https://<your-service>.onrender.com/mcp` with the header `Authorization: Bearer <secret>`. In Claude Code, for example: `claude mcp add --transport http lily https://<your-service>.onrender.com/mcp --header "Authorization: Bearer <secret>"`. Other tools name this option differently (headers, bearer token env var); check their docs.
+- The secret is never logged or stored; only a digest is kept in memory, compared in constant time. Logs and the `[audit]` line show the key's **label** (`client=terminal`), and rate limits count each key separately.
+- A key does not expire. Rotate it by changing the env var (a redeploy applies it), and give each tool its own label so you can revoke one without touching the others. OAuth sign-in for claude.ai keeps working next to the keys.
+
 ## Call limits and audit log
 - **Rate limits** on `/mcp` tool calls, per client IP, per minute (in memory, reset on restart): `MCP_RATE_LIMIT_PER_MIN` for all calls (default 120) and a tighter `MCP_WRITE_LIMIT_PER_MIN` for calls that change something (default 30). `0` turns a limit off. Over the limit the call is refused with a plain tool error before any handler or GitHub request runs; reads keep working while writes are limited.
 - **Audit log** for GitHub writes (commit, delete, branch, PR, issue, comment, rerun): one `[audit] {...}` JSON line per attempt in the server log with time, IP, tool, repo, branch/path, file count and result. It never contains file contents, commit messages or comment bodies, and errors are redacted. It lasts as long as Render keeps the logs.
