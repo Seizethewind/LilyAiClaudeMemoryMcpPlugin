@@ -140,6 +140,14 @@ Guard rails (env vars, see `.env.example`):
 - OAuth requires PKCE (S256 only), and an authorization code only works for the client and redirect URI it was issued to.
 - Optional nightly backup: set `BACKUP_REPO` (a **private** repo) → memories exported as JSONL via the GitHub API.
 
+## Reading code and history
+Beyond opening single files, four read-only tools help with larger repositories (all limited to `ALLOWED_REPOS`):
+- `search_code` searches one repo's code (default branch, paths only; GitHub rate-limits it to about 30 searches a minute). You cannot widen the search: `repo:`/`org:`/`user:` qualifiers in the query are refused.
+- `list_commits` lists commits for the default branch, a ref, a path or an author, with one-line messages.
+- `get_commit` shows one commit's message, stats and changed files; the diff text is only included when asked for and is cut.
+- `compare_refs` shows how far one ref is ahead of another, the commits in between and the files that differ.
+Commit messages and diffs were written by other people and are marked as untrusted data.
+
 ## Tool gateway (keeps the tool list small)
 By default only 12 everyday tools (file read/write, branch, `pr_create`, `pr_get`, `get_skill`, `get_breakdown_guide`, `memory_start/save/update`, `web_search`) plus three gateway tools are announced to Claude. Everything else stays available on demand:
 - `find_tools` lists the hidden tools by group (`pr`, `issue`, `actions`, `memory`, `blueprint`, `sandbox`, `web`, `repo`) or keyword, with full schemas.

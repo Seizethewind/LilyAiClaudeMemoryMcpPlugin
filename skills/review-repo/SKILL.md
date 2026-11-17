@@ -7,11 +7,11 @@ description: Use when asked to break down, audit or explain a repository. Result
 **Result:** a structured explanation of how the repo is built and why, saved to the Blueprint.
 
 ## Tools
-`get_breakdown_guide` `list_branches` `get_file_contents` `blueprint_save`
+`get_breakdown_guide` `list_branches` `get_file_contents` `search_code` `list_commits` `blueprint_save`
 
 ## Steps
 1. `get_breakdown_guide` first and follow it.
-2. `list_branches`, then `get_file_contents` on the root and entry points.
+2. `list_branches`, then `get_file_contents` on the root and entry points. Use `search_code` to find where something lives instead of opening file after file, and `list_commits` to see what changed recently and why.
 3. Write the breakdown; mark anything you did not read.
 4. `blueprint_save` each section with `based_on`.
 
